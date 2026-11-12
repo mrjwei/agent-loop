@@ -131,6 +131,7 @@ mkdir -p "$PROMPTS_DIR"
 printf '<!--\ninstructions\n-->\n- rule one\n' >"$PROMPTS_DIR/project.md"
 out=$(T_N=3 T_BRANCH=agent/issue-3 render_prompt implement)
 case "$out" in *"- rule one"*) ok "render_prompt: project rules inserted" ;; *) ng "render_prompt: project rules inserted" ;; esac
+case "$out" in *'`Refs #3` instead'*) ok "render_prompt: a partial PR must not close the issue" ;; *) ng "render_prompt: a partial PR must not close the issue" ;; esac
 case "$out" in *instructions*) ng "render_prompt: HTML comments stripped" ;; *) ok "render_prompt: HTML comments stripped" ;; esac
 case "$out" in *"{{"[A-Z]*) ng "render_prompt: no placeholders left" "$(echo "$out" | grep -o '{{[A-Z_]*}}' | head -3)" ;; *) ok "render_prompt: no placeholders left" ;; esac
 rm -rf "$T/proj/.agent-loop"
@@ -220,6 +221,24 @@ AWS_PROFILE=prod SETUP_OUT="$T/setup.out" AGENT_SETUP_CMD='echo "setup sees ${AW
   FAKE_CLAUDE_RESULT="$T/fix-result.jsonl" "$B" "$ROOT/libexec/work.sh" 3 --fix >"$T/work.out" 2>&1
 check "work: a fix run finishes" 0 $?
 check "work: AGENT_SETUP_CMD runs without the scrubbed credentials" 'setup sees nothing' "$(cat "$T/setup.out" 2>/dev/null)"
+
+# --- loop.sh: one round. PR #9 (issue 1) was merged, but issue 1 is still open ---
+tick() { AGENT_FROM_COPY=1 "$B" "$ROOT/libexec/loop.sh" --tick --no-triage "$@" 2>&1; }
+git -C "$T/proj" branch agent/issue-1
+out=$(tick --dry-run)
+check "loop: a merged PR with an open issue is reported on the issue" 1 \
+  "$(echo "$out" | grep -c 'dry-run. gh issue comment 1 .*PR #9 was merged but this issue is still open')"
+check "loop: and the same round does not start that issue again" '7 8' \
+  "$(echo "$out" | sed -n 's/.*start implement for #\([0-9]*\).*/\1/p' | tr '\n' ' ' | sed 's/ $//')"
+: >"$GH_LOG"
+AGENT_MAX_PARALLEL=0 tick >/dev/null   # for real, with no slot to start agents in
+check "loop: cleanup removes the labels, comments once and deletes the branch" 'issue edit 1 --remove-label agent-ok|1|gone' \
+  "$(grep -m1 'remove-label agent-ok' "$GH_LOG")|$(grep -c '^issue comment 1 ' "$GH_LOG")|$(git -C "$T/proj" rev-parse -q --verify agent/issue-1 >/dev/null || echo gone)"
+git -C "$T/proj" branch agent/issue-1   # agent-ok was added again and new work started
+: >"$GH_LOG"
+AGENT_MAX_PARALLEL=0 tick >/dev/null
+check "loop: the handled PR does not clean up the new work" 'kept|0' \
+  "$(git -C "$T/proj" rev-parse -q --verify agent/issue-1 >/dev/null && echo kept)|$(wc -l <"$GH_LOG" | tr -d ' ')"
 
 # --- CLI ---
 check "cli: version" "$(cat "$ROOT/VERSION")" "$("$ROOT/bin/agent-loop" version)"

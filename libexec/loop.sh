@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The agent loop. Looks at GitHub at a fixed interval and repeats the steps below (AI cost only accrues while an agent runs).
-#   1. Clean up: remove the worktree, branches and state of PRs that were merged or closed
+#   1. Clean up: remove the worktree, branches and state of PRs that were merged or closed. An issue that is still open
+#                after its PR was merged or closed loses agent-ok, so the same work does not start again
 #   2. Fix:      for an agent PR with a conflict, a failing check or new review feedback, run work.sh --fix
 #   3. Triage:   when nothing is ready to start and the base branch moved since the last triage, run triage.sh
 #   4. Start:    run work.sh in parallel for issues that are agent-ok with all dependencies closed, up to the free slots
@@ -81,25 +82,47 @@ cleanup_branch() { # issue reason
   [ "$DRY" = 1 ] || forget_issue "$n"
 }
 
+issue_open() { jq -e --argjson n "$1" 'any(.[]; .number == $n)' "$ISSUES_JSON" >/dev/null; }
+
+# Take agent-ok / agent-wip off an issue: on GitHub, and in this round's snapshot so that step 4 does not start it
+unlabel_issue() { # issue
+  local t
+  label_remove "$1" "$L_OK"; label_remove "$1" "$L_WIP"
+  t=$(mktemp "$STATE/issues.XXXXXX")
+  jq --argjson n "$1" --arg ok "$L_OK" --arg wip "$L_WIP" \
+    'map(if .number == $n then .labels -= [$ok, $wip] else . end)' "$ISSUES_JSON" >"$t" && mv "$t" "$ISSUES_JSON"
+}
+
 phase_cleanup() {
-  local ref n pr
+  local ref n pr state last
   for ref in $(git -C "$REPO" for-each-ref --format='%(refname:short)' 'refs/heads/agent/issue-*'); do
     n=${ref#agent/issue-}
     case "$n" in '' | *[!0-9]*) continue ;; esac
     is_running "$n" && continue
     jq -e --argjson n "$n" 'any(.[]; .issue == $n)' "$PRS_JSON" >/dev/null && continue  # PR still open
-    if pr=$(pr_of_branch "$ref" merged) && [ -n "$pr" ]; then
-      cleanup_branch "$n" "PR #$pr was merged"
-    elif pr=$(pr_of_branch "$ref" closed) && [ -n "$pr" ] && [ "$(stamp_get closedpr "$n" "")" != "$pr" ]; then
-      # A human rejected it. Clean up once and remove agent-ok (if it is added again, the work restarts from the
-      # base branch on the same branch name; the old closed PR is ignored because it is remembered as handled).
-      cleanup_branch "$n" "PR #$pr was closed without merging"
-      if jq -e --argjson n "$n" 'any(.[]; .number == $n)' "$ISSUES_JSON" >/dev/null; then
-        label_remove "$n" "$L_OK"; label_remove "$n" "$L_WIP"
-        issue_comment "$n" "PR #$pr was closed without merging, so I removed \`$L_OK\`. Add it again to hand this back to an agent (it restarts from $AGENT_BASE_BRANCH)."
+    last=$(last_done_pr "$ref") || last=""
+    pr=${last%% *} state=${last#* }
+    if [ -n "$pr" ] && [ "$(stamp_get closedpr "$n" "")" != "$pr" ]; then
+      # The branch's latest PR is finished and not handled yet: clean up, once. If the issue is still open, also
+      # remove agent-ok, or the next round would start the same work again. That happens when a human rejected the
+      # PR, and after a merge when "Closes #n" did not apply (the base branch is not the default branch, the line
+      # is missing, or part of the issue was left for a person). If agent-ok is added again, the work restarts from
+      # the base branch on the same branch name; this PR is then ignored because it is remembered as handled.
+      if [ "$state" = MERGED ]; then
+        cleanup_branch "$n" "PR #$pr was merged"
+        if issue_open "$n"; then
+          unlabel_issue "$n"
+          issue_comment "$n" "PR #$pr was merged but this issue is still open, so I removed \`$L_OK\`. Close the issue if it is done. If part of it is left for an agent, add \`$L_OK\` again (it starts from $AGENT_BASE_BRANCH)."
+        fi
+      else
+        cleanup_branch "$n" "PR #$pr was closed without merging"
+        if issue_open "$n"; then
+          unlabel_issue "$n"
+          issue_comment "$n" "PR #$pr was closed without merging, so I removed \`$L_OK\`. Add it again to hand this back to an agent (it restarts from $AGENT_BASE_BRANCH)."
+        fi
       fi
       [ "$DRY" = 1 ] || stamp_set closedpr "$n" "$pr"
-    elif ! jq -e --argjson n "$n" 'any(.[]; .number == $n)' "$ISSUES_JSON" >/dev/null; then
+    elif ! issue_open "$n"; then
       cleanup_branch "$n" "the issue was closed"
     fi
   done
@@ -113,7 +136,7 @@ phase_fix() {
   while IFS= read -r p <&3; do
     n=$(echo "$p" | jq .issue)
     is_running "$n" && continue
-    jq -e --argjson n "$n" 'any(.[]; .number == $n)' "$ISSUES_JSON" >/dev/null || continue
+    issue_open "$n" || continue
     has_label "$ISSUES_JSON" "$n" "$L_BLOCKED" && continue
     reasons=$(pr_fix_reasons "$p" "$(stamp_get handled "$n")")
     [ "$(echo "$reasons" | jq .needed)" = true ] || continue

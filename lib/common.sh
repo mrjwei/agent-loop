@@ -257,6 +257,12 @@ pr_of_branch() { # branch state(open|merged|closed|all) -> PR number (PRs from f
     -q '[.[] | select(.isCrossRepository | not)][0].number // empty'
 }
 
+# The most recent PR of a branch that is no longer open, as "<number> <MERGED|CLOSED>" (PRs from forks do not count)
+last_done_pr() { # branch
+  gh pr list --head "$1" --state all --limit 30 --json number,state,isCrossRepository \
+    -q '[.[] | select((.isCrossRepository | not) and .state != "OPEN")] | max_by(.number) // empty | "\(.number) \(.state)"'
+}
+
 # New feedback on a PR since a timestamp. Only from trusted authors (AGENT_TRUSTED_ASSOCIATIONS / AGENT_TRUSTED_USERS):
 # the text goes into the fix prompt, so nobody else may put words there. Also excludes ignored bots, the agent's own
 # comments and reviews with no comment
