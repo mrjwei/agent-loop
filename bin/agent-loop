@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# agent-loop: an autonomous issue -> PR loop driven by headless Claude Code. Run it from inside your project.
+set -euo pipefail
+
+# Resolve symlinks (macOS has no portable `readlink -f`)
+src=${BASH_SOURCE[0]}
+while [ -L "$src" ]; do
+  dir=$(cd "$(dirname "$src")" && pwd)
+  src=$(readlink "$src")
+  case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+PKG=$(cd "$(dirname "$src")/.." && pwd)
+
+usage() {
+  cat <<'EOF'
+Usage: agent-loop <command> [options]     (run inside the target project's git checkout)
+
+  init [--force] [--hook] [--no-labels] [--dry-run]
+                          set up the current project (config, prompts, labels; --hook also adds the
+                          verify Stop hook to .claude/settings.json for interactive sessions)
+  doctor                  check the tools the loop needs
+  start [--once] [--dry-run] [--no-triage]
+                          run the loop (Ctrl-C to stop; --dry-run prints what it would do)
+  status                  running agents, agent PRs, blocked issues, issues ready to start
+  kill                    stop running agents (worktrees stay; the next run continues from them)
+  unpause                 clear a usage-limit pause
+  work <issue> [--fix]    run one issue by hand (implement, or fix its PR)
+  triage [--dry-run]      compare plan files with issues and propose/apply issue changes
+  labels                  create the agent-ok / agent-wip / agent-blocked / human labels
+  version                 print the version
+
+Configuration lives in .agent-loop.conf at the project root. See the README.
+EOF
+}
+
+cmd=${1:-help}
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  start | loop) exec "$PKG/libexec/loop.sh" "$@" ;;
+  status) exec "$PKG/libexec/loop.sh" --status ;;
+  kill) exec "$PKG/libexec/loop.sh" --kill ;;
+  unpause) exec "$PKG/libexec/loop.sh" --unpause ;;
+  work) exec "$PKG/libexec/work.sh" "$@" ;;
+  triage) exec "$PKG/libexec/triage.sh" "$@" ;;
+  labels) exec "$PKG/libexec/init.sh" --labels-only ;;
+  init) exec "$PKG/libexec/init.sh" "$@" ;;
+  doctor) exec "$PKG/libexec/init.sh" --check ;;
+  version | -V | --version) cat "$PKG/VERSION" 2>/dev/null || echo dev ;;
+  help | -h | --help) usage ;;
+  *) echo "agent-loop: unknown command: $cmd" >&2; usage >&2; exit 2 ;;
+esac
