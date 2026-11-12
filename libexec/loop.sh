@@ -44,7 +44,7 @@ for a in "$@"; do
     --no-triage) NO_TRIAGE=1 ;;
     --tick) tick=1 ;;
     --status) mode=status ;;
-    --kill) mode=kill ;;
+    --kill) mode="kill" ;;   # quoted: an unquoted word that names a command looks like a mistake to shellcheck
     --unpause) mode=unpause ;;
     *) die "unknown argument: $a" ;;
   esac
