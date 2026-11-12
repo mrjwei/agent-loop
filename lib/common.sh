@@ -107,11 +107,13 @@ WORKER_DENY=(
   # git: rewriting history (including +refspec force-pushes) and worktree management
   "Bash(git push*--force*)" "Bash(git push* -f*)" "Bash(git push*+*)" "Bash(git rebase:*)"
   "Bash(git reset --hard:*)" "Bash(git worktree:*)"
-  # Credential stores (Read and Bash). The main checkout's .env files may hold production keys.
+  # Credential stores (Read and Bash). The main checkout's .env files may hold production keys: Read is denied for
+  # them, and Bash for commands that name them by absolute path or as .env.local / .env.production. (A relative
+  # path to a plain .env matches no rule; a rule for "*.env*" would also deny every command that mentions process.env.)
   "Read(~/.aws/**)" "Bash(*.aws/*)" "Read(~/.ssh/**)" "Read(~/.config/gh/**)" "Bash(*.config/gh*)"
   "Read(~/Library/Keychains/**)" "Bash(security *)" "Bash(*&& security *)"
   "Read(/${REPO}/.env)" "Read(/${REPO}/.env.local)" "Read(/${REPO}/.env.production)" "Read(/${REPO}/.env.*.local)"
-  "Bash(*.env.local*)" "Bash(*.env.production*)"
+  "Bash(*.env.local*)" "Bash(*.env.production*)" "Bash(*${REPO}/.env*)"
   ${AGENT_EXTRA_DENY[@]+"${AGENT_EXTRA_DENY[@]}"}
 )
 # The triage agent only reads. This also overrides the project's .claude/settings.json allows (git commit, push, ...).
