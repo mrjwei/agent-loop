@@ -92,7 +92,7 @@ Outcomes are judged by GitHub's real state (is a PR open?), not by what the agen
 
 ### What you do
 
-- Review and merge PRs. Comment on a PR to ask for changes; the next round reads the comment, then fixes or replies with a comment starting `🤖 agent:`.
+- Review and merge PRs. A PR that covers the whole issue closes it on merge; one that leaves part for you says so in its body and keeps the issue open, without `agent-ok`. Comment on a PR to ask for changes; the next round reads the comment, then fixes or replies with a comment starting `🤖 agent:`.
 - Answer `agent-blocked` issues in a comment, then remove the label. The previous conversation opens with `cd ../<repo>-agent-<n> && claude -r <session-id>` (the id is in the issue comment and the log).
 
 ## Configuration

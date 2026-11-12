@@ -135,6 +135,7 @@ mkdir -p "$PROMPTS_DIR"
 printf '<!--\ninstructions\n-->\n- rule one\n' >"$PROMPTS_DIR/project.md"
 out=$(T_N=3 T_BRANCH=agent/issue-3 render_prompt implement)
 case "$out" in *"- rule one"*) ok "render_prompt: project rules inserted" ;; *) ng "render_prompt: project rules inserted" ;; esac
+case "$out" in *'`Refs #3` instead'*) ok "render_prompt: a partial PR must not close the issue" ;; *) ng "render_prompt: a partial PR must not close the issue" ;; esac
 case "$out" in *instructions*) ng "render_prompt: HTML comments stripped" ;; *) ok "render_prompt: HTML comments stripped" ;; esac
 case "$out" in *"{{"[A-Z]*) ng "render_prompt: no placeholders left" "$(echo "$out" | grep -o '{{[A-Z_]*}}' | head -3)" ;; *) ok "render_prompt: no placeholders left" ;; esac
 rm -rf "$T/proj/.agent-loop"
