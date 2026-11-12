@@ -71,7 +71,7 @@ agent-loop version
 | # | Step | What happens |
 |---|---|---|
 | 1 | Clean up | For PRs merged, closed unmerged, or whose issue closed: remove the worktree `../<repo>-agent-<n>`, the local and remote branch, and the state. A rejected issue loses `agent-ok` (once). Logs older than 14 days are deleted. |
-| 2 | Fix | An open PR on branch `agent/issue-<n>` with a conflict, a failing check or new review feedback gets `work --fix`. Nothing runs if nothing changed since the last fix. After 3 rounds it becomes `agent-blocked`. |
+| 2 | Fix | An open PR on branch `agent/issue-<n>` with a conflict, a failing check or new review feedback from a trusted author gets `work --fix`. Nothing runs if nothing changed since the last fix. After 3 rounds it becomes `agent-blocked`. |
 | 3 | Triage | When nothing is ready to start and the base branch moved since the last triage, run triage (only if `AGENT_PLANS_GLOB` is set). |
 | 4 | Start | Issues with `agent-ok`, without `human` / `agent-blocked`, with no sub-issues and all dependencies closed start in number order, up to `AGENT_MAX_PARALLEL`. Dependencies are GitHub's "blocked by" relations plus a `Depends on: #12, #13` line in the body. |
 
@@ -124,6 +124,8 @@ Outcomes are judged by GitHub's real state (is a PR open?), not by what the agen
 | `AGENT_IGNORE_CHECKS` | empty | CI check names (comma-separated) that never trigger a fix |
 | `AGENT_IGNORE_FEEDBACK_USERS` | `github-actions[bot]` | Users whose comments are never feedback |
 | `AGENT_CLEAN_REVIEW_USER` | `claude[bot]` | A "No issues found" comment from this user is not feedback |
+| `AGENT_TRUSTED_ASSOCIATIONS` | `OWNER MEMBER COLLABORATOR` | GitHub author associations whose comments count as feedback and whose issues triage may give `agent-ok` (`*` = everyone) |
+| `AGENT_TRUSTED_USERS` | the value of `AGENT_CLEAN_REVIEW_USER` | Logins trusted whatever their association (review bots) |
 | `AGENT_NOTIFY` | `1` | macOS notifications |
 | `AGENT_LOG_DAYS` | `14` | Log retention |
 | `AGENT_EXTRA_ALLOW`, `AGENT_EXTRA_DENY`, `AGENT_EXTRA_TRIAGE_DENY` | empty arrays | Extra permission rules (Claude Code `--allowedTools` / `--disallowedTools` syntax) |
@@ -137,7 +139,7 @@ The branch name `agent/issue-<n>` and the label names are fixed.
 The agents get three prompts: `implement`, `fix` and `triage` (in `prompts/`). Two ways to adapt them to a project, both in `.agent-loop/prompts/`:
 
 - **`project.md`** is inserted into all three prompts under "Project rules". Use it for commit style, documents to update, what needs a human, issue conventions. HTML comments in it are stripped.
-- **`implement.md`, `fix.md`, `triage.md`** replace the packaged prompt entirely. Placeholders: `{{N}} {{BRANCH}} {{WT}} {{PR}} {{BASE}} {{LANGUAGE}} {{VERIFY}} {{MARKER}} {{RESUME}} {{REASONS}} {{PLANS}} {{MAX}} {{PROJECT}}` (not every placeholder is set in every prompt).
+- **`implement.md`, `fix.md`, `triage.md`** replace the packaged prompt entirely. Placeholders: `{{N}} {{BRANCH}} {{WT}} {{PR}} {{BASE}} {{LANGUAGE}} {{TRUSTED}} {{VERIFY}} {{MARKER}} {{RESUME}} {{REASONS}} {{PLANS}} {{MAX}} {{PROJECT}}` (not every placeholder is set in every prompt).
 
 `examples/acme_work_management/` shows a real configuration: a conf with project-specific allow/deny rules, a `project.md`, and a full `triage.md` override.
 
@@ -145,6 +147,7 @@ The agents get three prompts: `implement`, `fix` and `triage` (in `prompts/`). T
 
 These are best-effort defenses, **not a sandbox**: the agents run with your own permissions.
 
+- **Whose words count**: text on GitHub becomes instructions to an agent, so the people who can write it are the trust boundary. Only comments from trusted authors (`AGENT_TRUSTED_ASSOCIATIONS`, by default the owner, organization members and collaborators, plus `AGENT_TRUSTED_USERS`) start a fix run or reach the fix prompt. Triage never adds `agent-ok` to an issue someone else opened; label it yourself after reading it. The agents still read whole issue and PR threads with `gh`, and the prompts tell them to treat other people's comments as information only, which is a weaker defense: on a public repository, read a thread before you label its issue `agent-ok`.
 - **Denied commands** (built in): `gh pr merge`, closing PRs or issues, label changes, `gh api`, `gh auth`, `gh repo/secret/variable/workflow/release`, force-push (including `+refspec`), `git rebase`, `git reset --hard`, `git worktree`. Patterns also match in the middle of a command line. Your project's deploy and production commands are **yours to add** in `AGENT_EXTRA_DENY`.
 - **Credentials**: the variables in `AGENT_SCRUB_ENV` are removed; `~/.aws`, `~/.ssh`, `~/.config/gh`, the macOS keychain and the main checkout's `.env`, `.env.local`, `.env.production` are unreadable to the agent (Read and Bash denies).
 - **MCP**: `--strict-mcp-config` means no MCP servers or claude.ai connectors are loaded.
@@ -171,6 +174,7 @@ Everything is under `.git/agent-loop/` (outside version control, shared by all w
 | Symptom | What to do |
 |---|---|
 | Nothing starts | Read the top of `agent-loop status`. If it is paused by a usage limit, wait or run `agent-loop unpause`. Check the issue has `agent-ok`, no sub-issues (a parent is never worked on), and closed dependencies. `agent-loop doctor` warns when `origin/HEAD` is unset and the base branch fell back to `main`. |
+| A PR comment is ignored | Its author is not trusted: see `AGENT_TRUSTED_ASSOCIATIONS` and `AGENT_TRUSTED_USERS`. A review bot must be listed in `AGENT_TRUSTED_USERS`. |
 | `the loop is already running` | Another terminal runs it. If it is not running, `rm -rf .git/agent-loop/loop.lock`. |
 | The same issue blocks repeatedly | Read the reason in the issue comment, then fix the issue text or remove `agent-ok`. You can also work in its worktree and push; the next fix run merges your commits. |
 | A worktree is left over | Cleanup skips worktrees with uncommitted changes. Inspect it, then `git worktree remove --force <path>` if unwanted. |

@@ -2,6 +2,7 @@
 # Compare the active plan files with the GitHub issues: create missing issues, fix inaccurate ones, set parent/child links and
 # dependencies, and add or remove agent-ok. The agent only reads and returns proposed changes as JSON; this script checks them
 # against the rules below and applies them.
+# Issue text is written by whoever opened the issue: the script never adds agent-ok to an issue from an untrusted author.
 # Usage: agent-loop triage [--dry-run]   (--dry-run only prints the proposal; the AI still runs and uses quota)
 set -euo pipefail
 . "$(dirname "$0")/../lib/common.sh"
@@ -154,6 +155,8 @@ jq -c ".structured_output.actions[:$AGENT_TRIAGE_MAX_ACTIONS][]" "$out" | while 
     [ -n "$cur" ] || { log "#$num is not open; skipping"; continue; }
     locked=$(echo "$cur" | jq --arg w "$L_WIP" --arg b "$L_BLOCKED" '.labels | (index($w) or index($b))')
     cur_human=$(echo "$cur" | jq --arg h "$L_HUMAN" '.labels | index($h) != null')
+    cur_trusted=$(echo "$cur" | jq --arg assoc "$AGENT_TRUSTED_ASSOCIATIONS" --arg users "$AGENT_TRUSTED_USERS" \
+      "$JQ_TRUSTED"'trusted(.author; .authorAssociation)')
     log "Update: #$num $(echo "$cur" | jq -r .title) - $why"
     if [ "$locked" = true ]; then
       log "  in progress or blocked: comment only"
@@ -170,6 +173,11 @@ jq -c ".structured_output.actions[:$AGENT_TRIAGE_MAX_ACTIONS][]" "$out" | while 
       rem=$(echo "$a" | jq -r '.remove_labels[]?' | grep -vx -e "$L_HUMAN" -e "$L_WIP" -e "$L_BLOCKED" || true)
       if [ "$cur_human" = true ] || echo "$add" | grep -qx "$L_HUMAN"; then
         echo "$add" | grep -qx "$L_OK" && log "  not adding $L_OK to a $L_HUMAN issue"
+        add=$(echo "$add" | grep -vx "$L_OK" || true)
+      fi
+      # An issue from someone who is not trusted reaches an agent only when a person labels it
+      if [ "$cur_trusted" != true ] && echo "$add" | grep -qx "$L_OK"; then
+        log "  not adding $L_OK: #$num was opened by $(echo "$cur" | jq -r '.author // "an unknown user"'), who is not trusted (AGENT_TRUSTED_ASSOCIATIONS / AGENT_TRUSTED_USERS). Add the label yourself if the issue is fine"
         add=$(echo "$add" | grep -vx "$L_OK" || true)
       fi
       [ -n "$add" ] && args+=(--add-label "$(echo "$add" | paste -sd, -)")
