@@ -64,6 +64,7 @@ else
   pr_json=$(agent_prs | jq -c --argjson n "$n" '.[] | select(.issue == $n)')
   [ -n "$pr_json" ] || die "could not read the state of the PR for #$n"
   reasons=$(pr_fix_reasons "$pr_json" "$since")
+  head_before=$(git ls-remote origin "refs/heads/$br" | cut -f1)   # to see afterwards whether the agent pushed anything
   T_REASONS=$(echo "$reasons" | jq -r '
     (if .conflict then "- The PR has merge conflicts with the base branch (mergeable=CONFLICTING).\n" else "" end)
     + (if (.failing | length) > 0 then "- Failing checks: \(.failing | join(", "))\n" else "" end)
@@ -151,7 +152,10 @@ case "$status" in
   fixed | blocked)
     # Finished: advance the feedback start time and remember the current state (so the same reasons do not start another run)
     stamp_set handled "$n" "$started"
-    stamp_set sig "$n" "$(pr_fix_reasons "$(agent_prs | jq -c --argjson n "$n" '.[] | select(.issue == $n)')" "$started" | jq -r .signature)"
+    pr_json=$(agent_prs | jq -c --argjson n "$n" '.[] | select(.issue == $n)')
+    if [ -z "$pr_json" ]; then log "#$n: PR #$pr is no longer open; nothing more to do"; exit 0; fi
+    after=$(pr_fix_reasons "$pr_json" "$started")
+    stamp_set sig "$n" "$(echo "$after" | jq -r .signature)"
     ;;
   *)
     # Failed or interrupted: remember nothing, so the next round runs again. loop.sh counts rounds and blocks at the limit
@@ -162,5 +166,12 @@ esac
 if [ "$status" = blocked ]; then
   run gh pr comment "$pr" --body "$AGENT_MARKER Stopped fixing this. ${reason:-$summary}" >/dev/null
   block_issue "$n" "PR #$pr: ${reason:-$summary} (${resume_hint})"
+elif [ "$(git ls-remote origin "refs/heads/$br" | cut -f1)" = "$head_before" ] &&
+  [ "$(echo "$after" | jq '.conflict or (.failing | length > 0)')" = true ]; then
+  # It reported "fixed" but pushed nothing, and the PR still has a conflict or a failing check. The state above is
+  # remembered as handled, so no further fix run would start: hand it to a human instead of leaving the PR to wait.
+  left=$(echo "$after" | jq -r '[(if .conflict then "merge conflicts" else empty end), (.failing[] | "failing check `\(.)`")] | join(", ")')
+  run gh pr comment "$pr" --body "$AGENT_MARKER The fix run pushed nothing, and this PR still has: ${left}. Waiting for a human. ${summary}" >/dev/null
+  block_issue "$n" "PR #$pr still has ${left}, and the last fix run pushed nothing (it reported: ${summary:-no summary}). If a check is flaky, re-run it; otherwise push a fix or say what to do. (${resume_hint})"
 fi
 exit 0
