@@ -1,10 +1,10 @@
 # make install [PREFIX=~/.local]   copies the package to $(PREFIX)/share/agent-loop and links $(PREFIX)/bin/agent-loop
-# make uninstall | make test
+# make uninstall | make test | make lint (needs shellcheck)
 PREFIX ?= $(HOME)/.local
 SHARE = $(PREFIX)/share/agent-loop
 FILES = bin lib libexec prompts templates VERSION
 
-.PHONY: install uninstall test
+.PHONY: install uninstall test lint
 
 install:
 	rm -rf "$(SHARE)"
@@ -19,3 +19,6 @@ uninstall:
 
 test:
 	bash test/run.sh
+
+lint:
+	shellcheck -S warning bin/agent-loop lib/common.sh libexec/*.sh test/run.sh
