@@ -143,6 +143,11 @@ check "issues_snapshot: body dependencies parsed" '[1,99]|[98]' \
 check "ready_issues: agent-ok, not human/blocked/parent, dependencies closed" '1 7 8' \
   "$(ready_issues "$T/issues.json" | tr '\n' ' ' | sed 's/ $//')"
 
+# --- Agent PRs ---
+check "agent_prs: only this repository's open PRs on agent branches" '[[20,3]]' "$(agent_prs | jq -c 'map([.pr, .issue])')"
+check "pr_of_branch: finds the PR of a branch, ignores a fork's PR" '20|' \
+  "$(pr_of_branch agent/issue-3 open)|$(pr_of_branch agent/issue-6 open)"
+
 # --- PR fix reasons ---
 pr='{"pr":5,"issue":3,"head":"abc","mergeable":"CONFLICTING","checks":[
   {"name":"test","status":"COMPLETED","conclusion":"FAILURE"},{"name":"claude-review","status":"COMPLETED","conclusion":"FAILURE"},
