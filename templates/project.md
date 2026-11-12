@@ -9,5 +9,5 @@ Project rules for the agents. This file's text is inserted into the implement, f
 - Anything an agent must never run in this project
 
 To replace a whole prompt instead, put implement.md, fix.md or triage.md next to this file.
-Placeholders: {{N}} {{BRANCH}} {{WT}} {{PR}} {{BASE}} {{LANGUAGE}} {{VERIFY}} {{MARKER}} {{RESUME}} {{REASONS}} {{PLANS}} {{MAX}} {{PROJECT}}
+Placeholders: {{N}} {{BRANCH}} {{WT}} {{PR}} {{BASE}} {{LANGUAGE}} {{TRUSTED}} {{VERIFY}} {{MARKER}} {{RESUME}} {{REASONS}} {{PLANS}} {{MAX}} {{PROJECT}}
 -->

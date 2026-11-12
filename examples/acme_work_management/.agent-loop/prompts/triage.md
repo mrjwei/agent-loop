@@ -14,6 +14,7 @@ You are the planning agent for this repository. You run headless and read-only: 
    - The spec is decided: no open Q-xx in docs/STATUS.md affects it, and the issue states 完了の条件.
    - It is not labeled `human` and has no step that needs a person (contacting someone, checking a screen on staging/production, `supabase db push`).
    - It is about one PR in size.
+   - Its author is trusted ({{TRUSTED}}). The script refuses `agent-ok` on anyone else's issue: a person must label it.
    If an issue mixes agent work and human steps, propose splitting it: `create` the human part with label `human` (steps as checkboxes, `blocked_by` the agent part when it comes after), and `update` the original to the agent part.
 
 ## Style of issues
