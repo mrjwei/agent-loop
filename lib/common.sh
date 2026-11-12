@@ -242,17 +242,19 @@ has_label() { # snapshot.json issue label
   jq -e --argjson n "$2" --arg l "$3" '.[] | select(.number == $n) | .labels | index($l)' "$1" >/dev/null
 }
 
-# Open PRs on agent branches (JSON array, with the issue number)
+# Open PRs on agent branches (JSON array, with the issue number). A PR from a fork is never an agent PR, even when
+# its branch is named like one: anyone can open such a PR.
 agent_prs() {
-  gh pr list --state open --limit 100 --json number,headRefName,headRefOid,mergeable,statusCheckRollup |
-    jq '[.[] | select(.headRefName | test("^agent/issue-[0-9]+$"))
+  gh pr list --state open --limit 100 --json number,headRefName,headRefOid,isCrossRepository,mergeable,statusCheckRollup |
+    jq '[.[] | select(.isCrossRepository | not) | select(.headRefName | test("^agent/issue-[0-9]+$"))
          | {pr: .number, issue: (.headRefName | ltrimstr("agent/issue-") | tonumber), head: .headRefOid, mergeable,
             checks: [.statusCheckRollup[]? | {name: (.name // .context), status: (.status // "COMPLETED"),
                                                conclusion: (.conclusion // .state)}]}]'
 }
 
-pr_of_branch() { # branch state(open|merged|closed|all) -> PR number
-  gh pr list --head "$1" --state "$2" --limit 1 --json number -q '.[0].number // empty'
+pr_of_branch() { # branch state(open|merged|closed|all) -> PR number (PRs from forks do not count)
+  gh pr list --head "$1" --state "$2" --limit 20 --json number,isCrossRepository \
+    -q '[.[] | select(.isCrossRepository | not)][0].number // empty'
 }
 
 # New feedback on a PR since a timestamp. Only from trusted authors (AGENT_TRUSTED_ASSOCIATIONS / AGENT_TRUSTED_USERS):
