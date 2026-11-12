@@ -107,6 +107,11 @@ WORKER_DENY=(
   # git: rewriting history (including +refspec force-pushes) and worktree management
   "Bash(git push*--force*)" "Bash(git push* -f*)" "Bash(git push*+*)" "Bash(git rebase:*)"
   "Bash(git reset --hard:*)" "Bash(git worktree:*)"
+  # git: pushing to the base branch, as a branch name or as the target of a refspec (branch protection is the real
+  # guard; this is a second layer)
+  "Bash(git push* ${AGENT_BASE_BRANCH})" "Bash(git push* ${AGENT_BASE_BRANCH} *)"
+  "Bash(git push*:${AGENT_BASE_BRANCH})" "Bash(git push*:${AGENT_BASE_BRANCH} *)"
+  "Bash(git push*:refs/heads/${AGENT_BASE_BRANCH}*)"
   # Credential stores (Read and Bash). The main checkout's .env files may hold production keys: Read is denied for
   # them, and Bash for commands that name them by absolute path or as .env.local / .env.production. (A relative
   # path to a plain .env matches no rule; a rule for "*.env*" would also deny every command that mentions process.env.)
