@@ -18,4 +18,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: shellcheck -S error bin/agent-loop lib/common.sh libexec/*.sh test/run.sh
+      - run: make lint   # shellcheck -S warning

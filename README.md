@@ -196,5 +196,6 @@ lib/common.sh         configuration, GitHub helpers, usage-limit handling
 prompts/              default implement / fix / triage prompts
 templates/            files `init` writes into a project
 examples/             a real project's configuration
-test/run.sh           offline tests (fake gh, no network): `make test`
+test/run.sh           offline tests (fake gh and claude, no network): `make test`
+Makefile              install / uninstall / test / lint (`make lint` runs shellcheck at warning level, as CI does)
 ```

@@ -44,14 +44,15 @@ for a in "$@"; do
     --no-triage) NO_TRIAGE=1 ;;
     --tick) tick=1 ;;
     --status) mode=status ;;
-    --kill) mode=kill ;;
+    --kill) mode="kill" ;;   # quoted: an unquoted word that names a command looks like a mistake to shellcheck
     --unpause) mode=unpause ;;
     *) die "unknown argument: $a" ;;
   esac
 done
 
 launch() { # issue implement|fix
-  local log_file="$STATE/logs/issue-$1-$(date +%Y%m%d-%H%M%S)-$2.log"
+  local log_file
+  log_file="$STATE/logs/issue-$1-$(date +%Y%m%d-%H%M%S)-$2.log"
   if [ "$DRY" = 1 ]; then log "[dry-run] start $2 for #$1"; return; fi
   # set -m: the agent leads its own process group, so Ctrl-C on the loop does not reach it and
   # `agent-loop kill` can stop the whole group (work.sh, claude and their children)
