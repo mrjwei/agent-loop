@@ -100,9 +100,10 @@ WORKER_ALLOW=(
   ${AGENT_EXTRA_ALLOW[@]+"${AGENT_EXTRA_ALLOW[@]}"}
 )
 WORKER_DENY=(
-  # GitHub: merge, close, labels, raw API, tokens
+  # GitHub: merge, close, labels, raw API, tokens. Labels: the `gh label` command and the --label / --add-label /
+  # --remove-label options (not every command that mentions labels: `gh issue view --json labels` only reads)
   "Bash(*gh *pr merge*)" "Bash(*gh *pr close*)" "Bash(*gh *pr ready*)" "Bash(*gh *issue close*)"
-  "Bash(*gh *issue edit*)" "Bash(*gh *issue delete*)" "Bash(*gh api*)" "Bash(*gh *label*)" "Bash(*gh auth*)"
+  "Bash(*gh *issue edit*)" "Bash(*gh *issue delete*)" "Bash(*gh api*)" "Bash(*gh label*)" "Bash(*gh * label *)" "Bash(*gh *-label*)" "Bash(*gh auth*)"
   "Bash(*gh *repo *)" "Bash(*gh *secret*)" "Bash(*gh *variable*)" "Bash(*gh *workflow*)" "Bash(*gh *release*)"
   # git: rewriting history (including +refspec force-pushes) and worktree management
   "Bash(git push*--force*)" "Bash(git push* -f*)" "Bash(git push*+*)" "Bash(git rebase:*)"
