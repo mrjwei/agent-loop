@@ -123,6 +123,10 @@ rm -f "$T/proj/.agent-loop.conf"
 . "$ROOT/lib/common.sh"
 set +e
 
+# --- Permission rules ---
+denied() { printf '%s\n' "${WORKER_DENY[@]}" | grep -Fxq -- "$1" && echo yes || echo no; }
+check "deny: shell commands that name the main checkout's .env files" yes "$(denied "Bash(*$REPO/.env*)")"
+
 # --- Prompt rendering ---
 printf 'a {{N}} b {{VAL}} {{new1}} {{UNSET}}.\n' >"$T/tpl.md"
 check "render: placeholders, symbols, lowercase refs kept" 'a 12 b x&y\1/z {{new1}} .' \
