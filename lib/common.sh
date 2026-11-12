@@ -62,6 +62,10 @@ AGENT_PLANS_ACTIVE_REGEX=${AGENT_PLANS_ACTIVE_REGEX:-^status: active} # a plan c
 AGENT_AUTOCREATE_LABELS=${AGENT_AUTOCREATE_LABELS:-}      # space-separated globs of labels triage may create (e.g. 'phase:*')
 AGENT_IGNORE_FEEDBACK_USERS=${AGENT_IGNORE_FEEDBACK_USERS:-github-actions[bot]} # space-separated; their comments never trigger a fix run
 AGENT_CLEAN_REVIEW_USER=${AGENT_CLEAN_REVIEW_USER:-claude[bot]} # a "No issues found" comment from this user is not feedback
+# Whose words the loop acts on. Comments by anyone else never start a fix run or reach a prompt, and triage never
+# adds agent-ok to their issues. On a public repository anyone can comment, so keep this to people you trust.
+AGENT_TRUSTED_ASSOCIATIONS=${AGENT_TRUSTED_ASSOCIATIONS:-OWNER MEMBER COLLABORATOR} # GitHub author associations, space-separated ('*' = everyone)
+AGENT_TRUSTED_USERS=${AGENT_TRUSTED_USERS:-$AGENT_CLEAN_REVIEW_USER} # space-separated logins trusted whatever their association (review bots)
 # Variables removed from the agents' environment (the agents run with your own permissions)
 AGENT_SCRUB_ENV=${AGENT_SCRUB_ENV:-AWS_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GOOGLE_APPLICATION_CREDENTIALS AZURE_CLIENT_SECRET SUPABASE_ACCESS_TOKEN SUPABASE_DB_PASSWORD SUPABASE_SERVICE_ROLE_KEY VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID NPM_TOKEN}
 # Variables set in the agents' environment (config-file array of NAME=VALUE)
@@ -73,6 +77,13 @@ if [ -z "$AGENT_BASE_BRANCH" ]; then
 fi
 BASE_REF="origin/$AGENT_BASE_BRANCH"
 case "$AGENT_PROMPTS_DIR" in /*) PROMPTS_DIR=$AGENT_PROMPTS_DIR ;; *) PROMPTS_DIR="$REPO/$AGENT_PROMPTS_DIR" ;; esac
+
+# jq function: is an author (login, author association) trusted? The jq call must pass
+# --arg assoc "$AGENT_TRUSTED_ASSOCIATIONS" --arg users "$AGENT_TRUSTED_USERS".
+# shellcheck disable=SC2016
+JQ_TRUSTED='def trusted($u; $a):
+  ($assoc | split(" ") | map(select(. != ""))) as $as | ($users | split(" ") | map(select(. != ""))) as $us
+  | (($as | index("*")) != null) or (($as | index($a // "")) != null) or (($us | index($u // "")) != null);'
 
 AGENT_MARKER='🤖 agent:'   # comments that start with this are the agent's own and never count as "new feedback"
 L_OK=agent-ok L_WIP=agent-wip L_BLOCKED=agent-blocked L_HUMAN=human
@@ -191,7 +202,7 @@ issues_snapshot() {
   q='query($o:String!,$r:String!,$after:String){repository(owner:$o,name:$r){
       issues(first:100,after:$after,states:OPEN,orderBy:{field:CREATED_AT,direction:ASC}){
       pageInfo{hasNextPage endCursor}
-      nodes{number title body labels(first:30){nodes{name}} parent{number}
+      nodes{number title body author{login} authorAssociation labels(first:30){nodes{name}} parent{number}
         subIssues(first:50){nodes{number state}} blockedBy(first:30){nodes{number state}}}}}}'
   pages=$(mktemp "$STATE/issues.XXXXXX")
   while :; do
@@ -208,6 +219,7 @@ issues_snapshot() {
 # Raw GraphQL issue nodes (a JSON array on stdin) -> the snapshot format the loop uses
 snapshot_normalize() {
     jq 'map({number, title, body: (.body // ""), parent: .parent.number,
+             author: .author.login, authorAssociation,
              labels: [.labels.nodes[].name], subIssues: [.subIssues.nodes[] | {number, state}],
              blockedBy: [.blockedBy.nodes[] | select(.state == "OPEN") | .number],
              # a "Depends on: #12, #13" line in the body also counts as a dependency (the Japanese "依存:" is accepted too)
@@ -230,29 +242,35 @@ has_label() { # snapshot.json issue label
   jq -e --argjson n "$2" --arg l "$3" '.[] | select(.number == $n) | .labels | index($l)' "$1" >/dev/null
 }
 
-# Open PRs on agent branches (JSON array, with the issue number)
+# Open PRs on agent branches (JSON array, with the issue number). A PR from a fork is never an agent PR, even when
+# its branch is named like one: anyone can open such a PR.
 agent_prs() {
-  gh pr list --state open --limit 100 --json number,headRefName,headRefOid,mergeable,statusCheckRollup |
-    jq '[.[] | select(.headRefName | test("^agent/issue-[0-9]+$"))
+  gh pr list --state open --limit 100 --json number,headRefName,headRefOid,isCrossRepository,mergeable,statusCheckRollup |
+    jq '[.[] | select(.isCrossRepository | not) | select(.headRefName | test("^agent/issue-[0-9]+$"))
          | {pr: .number, issue: (.headRefName | ltrimstr("agent/issue-") | tonumber), head: .headRefOid, mergeable,
             checks: [.statusCheckRollup[]? | {name: (.name // .context), status: (.status // "COMPLETED"),
                                                conclusion: (.conclusion // .state)}]}]'
 }
 
-pr_of_branch() { # branch state(open|merged|closed|all) -> PR number
-  gh pr list --head "$1" --state "$2" --limit 1 --json number -q '.[0].number // empty'
+pr_of_branch() { # branch state(open|merged|closed|all) -> PR number (PRs from forks do not count)
+  gh pr list --head "$1" --state "$2" --limit 20 --json number,isCrossRepository \
+    -q '[.[] | select(.isCrossRepository | not)][0].number // empty'
 }
 
-# New feedback on a PR since a timestamp. Excludes ignored bots, the agent's own comments and reviews with no comment
+# New feedback on a PR since a timestamp. Only from trusted authors (AGENT_TRUSTED_ASSOCIATIONS / AGENT_TRUSTED_USERS):
+# the text goes into the fix prompt, so nobody else may put words there. Also excludes ignored bots, the agent's own
+# comments and reviews with no comment
 pr_feedback() { # pr since
   local r; r=$(gh_repo)
   {
-    gh api --paginate "repos/$r/issues/$1/comments" --jq '.[] | {u: .user.login, t: .created_at, where: "PR comment", b: (.body // "")}'
-    gh api --paginate "repos/$r/pulls/$1/comments" --jq '.[] | {u: .user.login, t: .created_at, where: "\(.path):\(.line // .original_line // "")", b: (.body // "")}'
-    gh api --paginate "repos/$r/pulls/$1/reviews" --jq '.[] | {u: .user.login, t: .submitted_at, where: "review (\(.state))", b: (.body // "")}'
-  } | jq -s --arg since "$2" --arg m "$AGENT_MARKER" --arg ign "$AGENT_IGNORE_FEEDBACK_USERS" --arg clean "$AGENT_CLEAN_REVIEW_USER" '
+    gh api --paginate "repos/$r/issues/$1/comments" --jq '.[] | {u: .user.login, a: .author_association, t: .created_at, where: "PR comment", b: (.body // "")}'
+    gh api --paginate "repos/$r/pulls/$1/comments" --jq '.[] | {u: .user.login, a: .author_association, t: .created_at, where: "\(.path):\(.line // .original_line // "")", b: (.body // "")}'
+    gh api --paginate "repos/$r/pulls/$1/reviews" --jq '.[] | {u: .user.login, a: .author_association, t: .submitted_at, where: "review (\(.state))", b: (.body // "")}'
+  } | jq -s --arg since "$2" --arg m "$AGENT_MARKER" --arg ign "$AGENT_IGNORE_FEEDBACK_USERS" --arg clean "$AGENT_CLEAN_REVIEW_USER" \
+    --arg assoc "$AGENT_TRUSTED_ASSOCIATIONS" --arg users "$AGENT_TRUSTED_USERS" "$JQ_TRUSTED"'
     ($ign | split(" ")) as $ig
     | [.[] | select(.t > $since) | select(.u as $u | $ig | index($u) | not)
+         | select(trusted(.u; .a))
          | select((.b | gsub("\\s"; "")) != "") | select(.b | startswith($m) | not)
          | select((.u == $clean and (.b | test("No issues found"))) | not)]'
 }
@@ -307,13 +325,14 @@ render() { # file
 render_prompt() { # name
   T_BASE=$AGENT_BASE_BRANCH
   T_LANGUAGE=$AGENT_LANGUAGE
+  T_TRUSTED="author association ${AGENT_TRUSTED_ASSOCIATIONS// /, }${AGENT_TRUSTED_USERS:+; or user ${AGENT_TRUSTED_USERS// /, }}"
   if [ -n "$AGENT_VERIFY_CMD" ]; then T_VERIFY="\`$AGENT_VERIFY_CMD\`"
   else T_VERIFY="the project's own checks (see CLAUDE.md, README.md and the CI configuration)"; fi
   T_PROJECT=""
   # project.md: HTML comments (the instructions in the template) are not sent to the agent
   [ -f "$PROMPTS_DIR/project.md" ] && T_PROJECT=$(awk '/<!--/ { c = 1 } !c { print } /-->/ { c = 0 }' "$PROMPTS_DIR/project.md")
   [ -n "$(echo "$T_PROJECT" | tr -d '[:space:]')" ] || T_PROJECT="(none)"
-  export T_BASE T_LANGUAGE T_VERIFY T_PROJECT
+  export T_BASE T_LANGUAGE T_TRUSTED T_VERIFY T_PROJECT
   render "$(prompt_file "$1")"
 }
 
