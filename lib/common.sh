@@ -1,0 +1,390 @@
+# shellcheck shell=bash
+# Shared configuration and functions for agent-loop. Sourced by every script in libexec/.
+# Written for macOS's stock bash 3.2 (no associative arrays, mapfile or `wait -n`).
+
+# --- Locate the package and the target repository ---
+LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+PKG_DIR=$(dirname "$LIB_DIR")
+LIBEXEC="$PKG_DIR/libexec"
+
+# The target project's main checkout (not a worktree). loop.sh runs from a private copy of the
+# package and hands the path down in AGENT_REPO.
+if [ -n "${AGENT_REPO:-}" ]; then
+  REPO=$AGENT_REPO
+else
+  _common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || {
+    echo "agent-loop: not inside a git repository (cd into your project, or set AGENT_REPO)" >&2
+    exit 1
+  }
+  REPO=$(cd "$_common/.." && pwd)
+  unset _common
+fi
+STATE="$REPO/.git/agent-loop"   # state and logs (inside .git, shared by all worktrees)
+
+# --- Configuration: defaults < .agent-loop.conf < environment ---
+# Exported AGENT_* variables win over the config file. Arrays can only be set in the config file.
+# (declare -p quotes values safely, including ones with newlines)
+_env_saved=$(for _v in $(compgen -e); do case "$_v" in (AGENT_*) declare -p "$_v" ;; esac; done)
+AGENT_CONF=${AGENT_CONF:-$REPO/.agent-loop.conf}
+# shellcheck disable=SC1090
+if [ -f "$AGENT_CONF" ]; then . "$AGENT_CONF"; fi
+eval "$_env_saved"
+unset _env_saved _v
+AGENT_LOOP_VERSION=$(cat "$PKG_DIR/VERSION" 2>/dev/null || echo dev)
+
+AGENT_MODEL=${AGENT_MODEL:-claude-sonnet-5-5}             # implement / fix agent
+AGENT_EFFORT=${AGENT_EFFORT:-high}
+AGENT_TRIAGE_MODEL=${AGENT_TRIAGE_MODEL:-claude-opus-5-5} # planning (triage) agent
+AGENT_TRIAGE_EFFORT=${AGENT_TRIAGE_EFFORT:-high}
+AGENT_PERMISSION_MODE=${AGENT_PERMISSION_MODE:-auto}      # auto: a classifier decides commands not on the allow list; denies always apply
+AGENT_MAX_PARALLEL=${AGENT_MAX_PARALLEL:-2}               # agents running at once
+AGENT_POLL_SECONDS=${AGENT_POLL_SECONDS:-300}             # how often to look at GitHub
+AGENT_MAX_ATTEMPTS=${AGENT_MAX_ATTEMPTS:-2}               # implementation attempts before agent-blocked
+AGENT_MAX_FIXES=${AGENT_MAX_FIXES:-3}                     # fix rounds per PR before agent-blocked
+AGENT_MAX_TURNS=${AGENT_MAX_TURNS:-150}
+AGENT_TRIAGE_MAX_TURNS=${AGENT_TRIAGE_MAX_TURNS:-80}
+AGENT_TRIAGE_MAX_ACTIONS=${AGENT_TRIAGE_MAX_ACTIONS:-15}  # triage changes applied per run
+AGENT_VERIFY_TIMEOUT=${AGENT_VERIFY_TIMEOUT:-600}         # seconds the Stop hook may spend on AGENT_VERIFY_CMD
+AGENT_IGNORE_CHECKS=${AGENT_IGNORE_CHECKS:-}              # comma-separated check names that never trigger a fix run
+AGENT_NOTIFY=${AGENT_NOTIFY:-1}                           # macOS notifications
+AGENT_LOG_DAYS=${AGENT_LOG_DAYS:-14}                      # logs older than this are deleted
+AGENT_LIMIT_PAUSE_SECONDS=${AGENT_LIMIT_PAUSE_SECONDS:-1800} # wait this long when a usage limit hits without a reset time
+AGENT_PAUSE_AT_UTILIZATION=${AGENT_PAUSE_AT_UTILIZATION:-0.8} # stop starting agents when a usage window passes this share (keeps some for you)
+
+AGENT_BASE_BRANCH=${AGENT_BASE_BRANCH:-}                  # default: origin's default branch, else main
+AGENT_WT_PREFIX=${AGENT_WT_PREFIX:-$(basename "$REPO")-agent} # worktrees are ../<prefix>-<issue>
+AGENT_SETUP_CMD=${AGENT_SETUP_CMD:-}                      # run in each worktree before the agent starts (e.g. dependency install)
+AGENT_VERIFY_CMD=${AGENT_VERIFY_CMD:-}                    # checks that must pass before a PR (told to the agent; used by the Stop hook)
+AGENT_LANGUAGE=${AGENT_LANGUAGE:-English}                 # language of commits, PRs, summaries and agent comments
+AGENT_PROMPTS_DIR=${AGENT_PROMPTS_DIR:-.agent-loop/prompts} # project prompt overrides (relative to the repo root)
+AGENT_PLANS_GLOB=${AGENT_PLANS_GLOB:-}                    # plan files for triage (e.g. 'docs/plans/*.md'); empty disables triage
+AGENT_PLANS_ACTIVE_REGEX=${AGENT_PLANS_ACTIVE_REGEX:-^status: active} # a plan counts as active when a line matches; empty = all
+AGENT_AUTOCREATE_LABELS=${AGENT_AUTOCREATE_LABELS:-}      # space-separated globs of labels triage may create (e.g. 'phase:*')
+AGENT_IGNORE_FEEDBACK_USERS=${AGENT_IGNORE_FEEDBACK_USERS:-github-actions[bot]} # space-separated; their comments never trigger a fix run
+AGENT_CLEAN_REVIEW_USER=${AGENT_CLEAN_REVIEW_USER:-claude[bot]} # a "No issues found" comment from this user is not feedback
+# Variables removed from the agents' environment (the agents run with your own permissions)
+AGENT_SCRUB_ENV=${AGENT_SCRUB_ENV:-AWS_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GOOGLE_APPLICATION_CREDENTIALS AZURE_CLIENT_SECRET SUPABASE_ACCESS_TOKEN SUPABASE_DB_PASSWORD SUPABASE_SERVICE_ROLE_KEY VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID NPM_TOKEN}
+# Variables set in the agents' environment (config-file array of NAME=VALUE)
+[ -n "${AGENT_CHILD_ENV+x}" ] || AGENT_CHILD_ENV=(AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null)
+
+if [ -z "$AGENT_BASE_BRANCH" ]; then
+  AGENT_BASE_BRANCH=$(git -C "$REPO" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)
+  AGENT_BASE_BRANCH=${AGENT_BASE_BRANCH:-main}
+fi
+BASE_REF="origin/$AGENT_BASE_BRANCH"
+case "$AGENT_PROMPTS_DIR" in /*) PROMPTS_DIR=$AGENT_PROMPTS_DIR ;; *) PROMPTS_DIR="$REPO/$AGENT_PROMPTS_DIR" ;; esac
+
+AGENT_MARKER='🤖 agent:'   # comments that start with this are the agent's own and never count as "new feedback"
+L_OK=agent-ok L_WIP=agent-wip L_BLOCKED=agent-blocked L_HUMAN=human
+
+mkdir -p "$STATE/running" "$STATE/count" "$STATE/stamp" "$STATE/logs"
+
+# --- Permissions given to the implement / fix agent ---
+# Denies are written so they also match in the middle of a command line (e.g. `tool --flag x deploy`), not only as a prefix.
+WORKER_ALLOW=(
+  "Bash(git status:*)" "Bash(git diff:*)" "Bash(git log:*)" "Bash(git show:*)" "Bash(git add:*)"
+  "Bash(git commit:*)" "Bash(git fetch:*)" "Bash(git merge:*)" "Bash(git push:*)"
+  "Bash(gh issue view:*)" "Bash(gh pr view:*)" "Bash(gh pr create:*)" "Bash(gh pr checks:*)"
+  "Bash(gh pr diff:*)" "Bash(gh pr comment:*)" "Bash(gh run view:*)" "Bash(gh run list:*)"
+  ${AGENT_EXTRA_ALLOW[@]+"${AGENT_EXTRA_ALLOW[@]}"}
+)
+WORKER_DENY=(
+  # GitHub: merge, close, labels, raw API, tokens
+  "Bash(*gh *pr merge*)" "Bash(*gh *pr close*)" "Bash(*gh *pr ready*)" "Bash(*gh *issue close*)"
+  "Bash(*gh *issue edit*)" "Bash(*gh *issue delete*)" "Bash(*gh api*)" "Bash(*gh *label*)" "Bash(*gh auth*)"
+  "Bash(*gh *repo *)" "Bash(*gh *secret*)" "Bash(*gh *variable*)" "Bash(*gh *workflow*)" "Bash(*gh *release*)"
+  # git: rewriting history (including +refspec force-pushes) and worktree management
+  "Bash(git push*--force*)" "Bash(git push* -f*)" "Bash(git push*+*)" "Bash(git rebase:*)"
+  "Bash(git reset --hard:*)" "Bash(git worktree:*)"
+  # Credential stores (Read and Bash). The main checkout's .env files may hold production keys.
+  "Read(~/.aws/**)" "Bash(*.aws/*)" "Read(~/.ssh/**)" "Read(~/.config/gh/**)" "Bash(*.config/gh*)"
+  "Read(~/Library/Keychains/**)" "Bash(security *)" "Bash(*&& security *)"
+  "Read(/${REPO}/.env)" "Read(/${REPO}/.env.local)" "Read(/${REPO}/.env.production)" "Read(/${REPO}/.env.*.local)"
+  "Bash(*.env.local*)" "Bash(*.env.production*)"
+  ${AGENT_EXTRA_DENY[@]+"${AGENT_EXTRA_DENY[@]}"}
+)
+# The triage agent only reads. This also overrides the project's .claude/settings.json allows (git commit, push, ...).
+TRIAGE_DENY=(
+  "${WORKER_DENY[@]}" Edit Write NotebookEdit
+  "Bash(git add:*)" "Bash(git commit:*)" "Bash(git push:*)" "Bash(git merge:*)" "Bash(git checkout:*)" "Bash(git switch:*)"
+  "Bash(*gh *create*)" "Bash(*gh *comment*)" "Bash(*gh *edit*)" "Bash(rm:*)"
+  ${AGENT_EXTRA_TRIAGE_DENY[@]+"${AGENT_EXTRA_TRIAGE_DENY[@]}"}
+)
+WORKER_SCHEMA='{"type":"object","required":["status","summary"],"properties":{
+  "status":{"type":"string","enum":["pr_opened","fixed","blocked","failed"]},
+  "pr_number":{"type":"integer"},
+  "summary":{"type":"string","description":"What you did, in '"$AGENT_LANGUAGE"', 1-3 sentences"},
+  "blocked_reason":{"type":"string","description":"Only when blocked/failed: what a human must decide or do, in '"$AGENT_LANGUAGE"'"}}}'
+
+log() { printf '%s %s\n' "$(date '+%m-%d %H:%M:%S')" "$*" >&2; }
+die() { log "error: $*"; exit 1; }
+now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# With DRY=1, commands that change something are printed instead of run
+run() { if [ "${DRY:-0}" = 1 ]; then log "[dry-run] $*"; else "$@"; fi; }
+
+notify() { # title body
+  [ "$AGENT_NOTIFY" = 1 ] && command -v osascript >/dev/null 2>&1 || return 0
+  osascript - "$1" "$2" >/dev/null 2>&1 <<'EOF' || true
+on run argv
+  display notification (item 2 of argv) with title (item 1 of argv)
+end run
+EOF
+}
+
+gh_repo() {
+  [ -s "$STATE/repo" ] || gh repo view --json nameWithOwner -q .nameWithOwner >"$STATE/repo"
+  cat "$STATE/repo"
+}
+
+wt_of() { echo "$(dirname "$REPO")/$AGENT_WT_PREFIX-$1"; }
+br_of() { echo "agent/issue-$1"; }
+
+# --- Running agents (pid files) ---
+# loop.sh starts each agent as the leader of its own process group, so stopping the group also stops `claude`
+# and everything it started. A `work` run started by hand is not a group leader: stop its children, then it.
+stop_agent() { # pid
+  kill -TERM -- "-$1" 2>/dev/null && return 0
+  pkill -TERM -P "$1" 2>/dev/null || true
+  kill -TERM "$1" 2>/dev/null
+}
+pid_file() { echo "$STATE/running/$1.pid"; }
+is_running() { local f; f=$(pid_file "$1"); [ -f "$f" ] && kill -0 "$(cat "$f")" 2>/dev/null; }
+running_count() {
+  local c=0 f
+  for f in "$STATE"/running/*.pid; do
+    [ -f "$f" ] || continue
+    if kill -0 "$(cat "$f")" 2>/dev/null; then c=$((c + 1)); else rm -f "$f"; fi
+  done
+  echo "$c"
+}
+
+# --- Counters and timestamps (per issue) ---
+count_get() { cat "$STATE/count/$1-$2" 2>/dev/null || echo 0; }
+count_inc() { local v; v=$(($(count_get "$1" "$2") + 1)); echo "$v" >"$STATE/count/$1-$2"; echo "$v"; }
+count_reset() { rm -f "$STATE/count/$1-$2"; }
+count_dec() { local v; v=$(($(count_get "$1" "$2") - 1)); [ "$v" -gt 0 ] && echo "$v" >"$STATE/count/$1-$2" || rm -f "$STATE/count/$1-$2"; }
+stamp_get() { cat "$STATE/stamp/$1-$2" 2>/dev/null || echo "${3:-1970-01-01T00:00:00Z}"; }
+stamp_set() { echo "$3" >"$STATE/stamp/$1-$2"; }
+forget_issue() { rm -f "$STATE"/count/*-"$1" "$STATE"/stamp/*-"$1"; }
+
+# --- GitHub ---
+label_add() { run gh issue edit "$1" --add-label "$2" >/dev/null; }
+label_remove() { run gh issue edit "$1" --remove-label "$2" >/dev/null 2>&1 || true; }
+issue_comment() { run gh issue comment "$1" --body "$AGENT_MARKER $2" >/dev/null; }
+
+ensure_labels() {
+  local have l
+  have=$(gh label list --limit 200 --json name -q '.[].name')
+  for l in "$L_OK:07a540:An agent may work on this" "$L_WIP:fbca04:An agent is working on this, or its PR awaits review" \
+    "$L_BLOCKED:b60205:The agent stopped and needs a human decision (answer in a comment, then remove this label to resume)" \
+    "$L_HUMAN:0e8a16:Work only a person can do (agent-ok is never added)"; do
+    echo "$have" | grep -qx "${l%%:*}" && continue
+    run gh label create "${l%%:*}" --color "$(echo "$l" | cut -d: -f2)" --description "${l#*:*:}" >/dev/null
+  done
+}
+
+# All open issues with labels, parent/child links and dependencies (a JSON array). One GraphQL call per 100 issues.
+issues_snapshot() {
+  local r q pages after="" page
+  r=$(gh_repo)
+  q='query($o:String!,$r:String!,$after:String){repository(owner:$o,name:$r){
+      issues(first:100,after:$after,states:OPEN,orderBy:{field:CREATED_AT,direction:ASC}){
+      pageInfo{hasNextPage endCursor}
+      nodes{number title body labels(first:30){nodes{name}} parent{number}
+        subIssues(first:50){nodes{number state}} blockedBy(first:30){nodes{number state}}}}}}'
+  pages=$(mktemp "$STATE/issues.XXXXXX")
+  while :; do
+    if [ -n "$after" ]; then page=$(gh api graphql -f o="${r%/*}" -f r="${r#*/}" -f after="$after" -f query="$q")
+    else page=$(gh api graphql -f o="${r%/*}" -f r="${r#*/}" -f query="$q"); fi
+    printf '%s\n' "$page" | jq -c '.data.repository.issues.nodes' >>"$pages"
+    [ "$(printf '%s' "$page" | jq -r '.data.repository.issues.pageInfo.hasNextPage')" = true ] || break
+    after=$(printf '%s' "$page" | jq -r '.data.repository.issues.pageInfo.endCursor')
+  done
+  jq -s 'add // []' "$pages" | snapshot_normalize
+  rm -f "$pages"
+}
+
+# Raw GraphQL issue nodes (a JSON array on stdin) -> the snapshot format the loop uses
+snapshot_normalize() {
+    jq 'map({number, title, body: (.body // ""), parent: .parent.number,
+             labels: [.labels.nodes[].name], subIssues: [.subIssues.nodes[] | {number, state}],
+             blockedBy: [.blockedBy.nodes[] | select(.state == "OPEN") | .number],
+             # a "Depends on: #12, #13" line in the body also counts as a dependency (the Japanese "依存:" is accepted too)
+             bodyDeps: [(.body // "") | split("\n")[] | select(test("^\\s*(依存|Depends on|Blocked by)\\s*[:：]"; "i"))
+                        | scan("#([0-9]+)") | .[0] | tonumber]})'
+}
+
+# Issues an agent can start, lowest number first: agent-ok, not human/blocked, not a parent, all dependencies closed
+ready_issues() { # snapshot.json
+  jq -r --arg ok "$L_OK" --arg h "$L_HUMAN" --arg b "$L_BLOCKED" '
+    [.[].number] as $open
+    | .[] | select((.labels | index($ok)) and ((.labels | index($h)) | not) and ((.labels | index($b)) | not))
+    | select((.subIssues | length) == 0)
+    | select((.blockedBy | length) == 0)
+    | select([.bodyDeps[] as $d | $open | index($d)] | all(. == null))
+    | .number' "$1"
+}
+
+has_label() { # snapshot.json issue label
+  jq -e --argjson n "$2" --arg l "$3" '.[] | select(.number == $n) | .labels | index($l)' "$1" >/dev/null
+}
+
+# Open PRs on agent branches (JSON array, with the issue number)
+agent_prs() {
+  gh pr list --state open --limit 100 --json number,headRefName,headRefOid,mergeable,statusCheckRollup |
+    jq '[.[] | select(.headRefName | test("^agent/issue-[0-9]+$"))
+         | {pr: .number, issue: (.headRefName | ltrimstr("agent/issue-") | tonumber), head: .headRefOid, mergeable,
+            checks: [.statusCheckRollup[]? | {name: (.name // .context), status: (.status // "COMPLETED"),
+                                               conclusion: (.conclusion // .state)}]}]'
+}
+
+pr_of_branch() { # branch state(open|merged|closed|all) -> PR number
+  gh pr list --head "$1" --state "$2" --limit 1 --json number -q '.[0].number // empty'
+}
+
+# New feedback on a PR since a timestamp. Excludes ignored bots, the agent's own comments and reviews with no comment
+pr_feedback() { # pr since
+  local r; r=$(gh_repo)
+  {
+    gh api --paginate "repos/$r/issues/$1/comments" --jq '.[] | {u: .user.login, t: .created_at, where: "PR comment", b: (.body // "")}'
+    gh api --paginate "repos/$r/pulls/$1/comments" --jq '.[] | {u: .user.login, t: .created_at, where: "\(.path):\(.line // .original_line // "")", b: (.body // "")}'
+    gh api --paginate "repos/$r/pulls/$1/reviews" --jq '.[] | {u: .user.login, t: .submitted_at, where: "review (\(.state))", b: (.body // "")}'
+  } | jq -s --arg since "$2" --arg m "$AGENT_MARKER" --arg ign "$AGENT_IGNORE_FEEDBACK_USERS" --arg clean "$AGENT_CLEAN_REVIEW_USER" '
+    ($ign | split(" ")) as $ig
+    | [.[] | select(.t > $since) | select(.u as $u | $ig | index($u) | not)
+         | select((.b | gsub("\\s"; "")) != "") | select(.b | startswith($m) | not)
+         | select((.u == $clean and (.b | test("No issues found"))) | not)]'
+}
+
+# Why a PR needs a fix run (JSON). Takes one agent_prs entry and the time to read feedback from
+pr_fix_reasons() { # pr_json since
+  local pr fb
+  pr=$(echo "$1" | jq -r .pr)
+  fb=$(pr_feedback "$pr" "$2")
+  echo "$1" | jq --argjson fb "$fb" --arg ignore "$AGENT_IGNORE_CHECKS" '
+    ($ignore | split(",")) as $ig
+    | {pr, head, conflict: (.mergeable == "CONFLICTING"),
+       failing: [.checks[] | select(.status == "COMPLETED")
+                 | select(.conclusion as $c | ["FAILURE", "TIMED_OUT", "ERROR", "ACTION_REQUIRED", "STARTUP_FAILURE"] | index($c))
+                 | .name | select(. as $n | $ig | index($n) | not)] | unique,
+       feedback: $fb}
+    | .needed = (.conflict or (.failing | length > 0) or (.feedback | length > 0))
+    | .signature = "\(.head)|\(.conflict)|\(.failing | join(","))|\([.feedback[].t] | max // "")"'
+}
+
+# Wait for a human (agent-blocked): comment the reason on the issue and notify
+block_issue() { # issue reason
+  label_add "$1" "$L_BLOCKED"
+  label_remove "$1" "$L_WIP"
+  issue_comment "$1" "Stopped working on this.
+
+$2
+
+Write your answer or the missing information in a comment on this issue, then remove the \`$L_BLOCKED\` label to resume from where it stopped."
+  count_reset attempts "$1"
+  count_reset fixes "$1"
+  rm -f "$STATE/stamp/sig-$1"
+  notify "Agent stopped (#$1)" "$2"
+}
+
+# --- Prompts ---
+# A project file in $PROMPTS_DIR replaces the packaged prompt of the same name.
+prompt_file() { # name
+  if [ -f "$PROMPTS_DIR/$1.md" ]; then echo "$PROMPTS_DIR/$1.md"; else echo "$PKG_DIR/prompts/$1.md"; fi
+}
+
+# Replace {{KEY}} in a template with the value of environment variable T_KEY (values may contain newlines and symbols)
+render() { # file
+  awk '{ line = $0; out = ""
+         while (match(line, /[{][{][A-Z_]+[}][}]/)) {
+           k = substr(line, RSTART + 2, RLENGTH - 4)
+           out = out substr(line, 1, RSTART - 1) ENVIRON["T_" k]; line = substr(line, RSTART + RLENGTH) }
+         print out line }' "$1"
+}
+
+# Render a prompt with the variables every prompt can use. Callers export T_* for the rest.
+render_prompt() { # name
+  T_BASE=$AGENT_BASE_BRANCH
+  T_LANGUAGE=$AGENT_LANGUAGE
+  if [ -n "$AGENT_VERIFY_CMD" ]; then T_VERIFY="\`$AGENT_VERIFY_CMD\`"
+  else T_VERIFY="the project's own checks (see CLAUDE.md, README.md and the CI configuration)"; fi
+  T_PROJECT=""
+  # project.md: HTML comments (the instructions in the template) are not sent to the agent
+  [ -f "$PROMPTS_DIR/project.md" ] && T_PROJECT=$(awk '/<!--/ { c = 1 } !c { print } /-->/ { c = 0 }' "$PROMPTS_DIR/project.md")
+  [ -n "$(echo "$T_PROJECT" | tr -d '[:space:]')" ] || T_PROJECT="(none)"
+  export T_BASE T_LANGUAGE T_VERIFY T_PROJECT
+  render "$(prompt_file "$1")"
+}
+
+# --- Usage limits (subscription 5-hour / weekly windows, API 429, overload 529) ---
+# A run stopped by a limit is not counted as a failure; loop.sh starts no new agents until the limit resets.
+PAUSE_FILE="$STATE/paused-until"
+
+# Last result event of a `claude -p --output-format stream-json` recording (JSONL)
+result_of() { jq -Rnc '[inputs | fromjson? | select(.type == "result")] | last // empty' "$1" 2>/dev/null; }
+
+# If the recording ended on a usage limit or overload, print the epoch second to resume at; otherwise fail
+limit_resume_at() { # stream.jsonl
+  local now kind
+  now=$(date +%s)
+  kind=$(jq -Rnr '[inputs | fromjson?] as $ev
+    | ([$ev[] | select(.type == "rate_limit_event") | .rate_limit_info | select(.status == "rejected") | .resetsAt // empty] | last) as $reset
+    | ([$ev[] | select(.type == "result")] | last) as $res
+    | (($res.result // "") | tostring) as $text
+    | ($reset | if type == "number" then (if . > 1e12 then . / 1000 else . end)
+                elif type == "string" then ((tonumber? // (sub("\\.[0-9]+"; "") | fromdateiso8601?)) // null)
+                else null end) as $sec
+    | if $sec != null then ($sec | floor | tostring)
+      elif $reset != null then "limit"
+      elif $res == null then empty
+      elif $res.api_error_status == 429 or ($text | test("hit your .*limit|out of extra usage|usage limit reached|rate.?limit"; "i")) then "limit"
+      elif $res.api_error_status == 529 or ($text | test("overloaded"; "i")) then "busy"
+      else empty end' "$1" 2>/dev/null) || return 1
+  case "$kind" in
+    '') return 1 ;;
+    limit) echo $((now + AGENT_LIMIT_PAUSE_SECONDS)) ;;
+    busy) echo $((now + 300)) ;;
+    *) [ "$kind" -gt "$now" ] && echo $((kind + 60)) || echo $((now + 300)) ;;
+  esac
+}
+
+paused_until() { cat "$PAUSE_FILE" 2>/dev/null || echo 0; }
+paused() { [ "$(date +%s)" -lt "$(paused_until)" ]; }
+fmt_epoch() { date -r "$1" '+%m/%d %H:%M' 2>/dev/null || date -d "@$1" '+%m/%d %H:%M'; }  # BSD date, then GNU date
+pause_until() { # epoch [reason] (only ever extends the current pause)
+  local why=${2:-Stopped by a usage limit (or overload)}
+  [ "$1" -gt "$(paused_until)" ] || return 0
+  echo "$1" >"$PAUSE_FILE"
+  log "${why}. Not starting new agents until $(fmt_epoch "$1")"
+  notify "Agents paused" "${why}. Resuming at $(fmt_epoch "$1")"
+}
+
+# If the last usage reading in a recording is over AGENT_PAUSE_AT_UTILIZATION, pause until that window resets
+pause_if_heavy_usage() { # stream.jsonl
+  local w
+  w=$(jq -Rnr --argjson t "$AGENT_PAUSE_AT_UTILIZATION" '
+    [inputs | fromjson? | select(.type == "rate_limit_event") | .rate_limit_info] | last // empty
+    | [.unifiedWindows // {} | to_entries[] | select((.value.utilization // 0) >= $t and (.value.resetsAt | type) == "number")]
+    | max_by(.value.resetsAt) // empty
+    | "\(.value.resetsAt | if . > 1e12 then . / 1000 else . end | floor) \(.key) \(.value.utilization * 100 | floor)"' "$1" 2>/dev/null) || return 0
+  [ -n "$w" ] || return 0
+  set -- $w
+  pause_until "$(($1 + 60))" "Usage ($2) reached ${3}% (threshold AGENT_PAUSE_AT_UTILIZATION=${AGENT_PAUSE_AT_UTILIZATION})"
+}
+
+# --settings JSON for the implement / fix agent: a Stop hook that runs AGENT_VERIFY_CMD before the agent may finish.
+# Passed per run, so the project needs no hook of its own and people's interactive sessions are unaffected.
+agent_settings() {
+  if [ -z "$AGENT_VERIFY_CMD" ]; then echo '{}'; return; fi
+  jq -nc --arg cmd "\"$LIBEXEC/verify-hook.sh\" --loop" --argjson t "$AGENT_VERIFY_TIMEOUT" \
+    '{hooks: {Stop: [{hooks: [{type: "command", command: $cmd, timeout: $t}]}]}}'
+}
+
+# Run a command with credential variables removed from the environment (AGENT_SCRUB_ENV) and AGENT_CHILD_ENV set.
+# Credential files are kept away from the agent by the Read/Bash denies in WORKER_DENY. Best effort, not a sandbox.
+without_credentials() {
+  local args=() v
+  for v in $AGENT_SCRUB_ENV; do args+=(-u "$v"); done
+  env ${args[@]+"${args[@]}"} ${AGENT_CHILD_ENV[@]+"${AGENT_CHILD_ENV[@]}"} "$@"
+}

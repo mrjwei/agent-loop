@@ -1,0 +1,11 @@
+<!-- Project rules for acme_work_management, inserted into the implement and fix prompts. (triage.md in this folder replaces the triage prompt.) -->
+- Read CLAUDE.md, the relevant chapters of docs/spec/SPEC.md, and the plan (docs/plans/) and ADRs the issue points to.
+- Stop with `blocked` when the work needs a decision that is not written down (an open Q-xx in docs/STATUS.md that affects it, or contradicting docs), AWS/Vercel/Supabase consoles or credentials, production data, deploying, `supabase db push`, or a person checking a screen.
+- Migrations must work with both the old and the new app (add first; drop in a later PR). Never run them against a remote database.
+- If you touched infra/, also run in infra/: `pnpm exec tsc --noEmit` and the `cdk synth` step exactly as in .github/workflows/ci.yml (dummy account; you have no AWS credentials and must not try to get any). Before pushing a PR, `pnpm build` must pass too.
+- Update the docs CLAUDE.md requires: the SPEC chapter and one line in its 改訂履歴 if the spec changed, the plan's 進捗状況/実装メモ, the docs/STATUS.md row for this issue, README.md or docs/runbooks/ if a procedure changed.
+- Commit in Japanese in the repo's style (e.g. `feat(H5): …`, `fix: …`) and mention the issue number.
+- Use the spec-reviewer subagent on the diff, fix what it reports, and commit again before opening the PR.
+- The PR body follows .github/pull_request_template.md. If you added a file under supabase/migrations/, start the body with: `⚠️ マイグレーションあり: マージの前に supabase db push が必要です`.
+- For docs/STATUS.md and plan files in a merge conflict, keep the facts from both sides.
+- Never run aws / cdk deploy / supabase db push.
