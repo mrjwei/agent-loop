@@ -78,8 +78,9 @@ fi
 # --- Run ---
 if [ -n "$AGENT_SETUP_CMD" ]; then
   log "#$n: setup: $AGENT_SETUP_CMD"
-  # A failure counts as a failed attempt (the next round tries again, then the issue becomes agent-blocked)
-  bash -c "$AGENT_SETUP_CMD" || die "#$n: AGENT_SETUP_CMD failed in $wt (exit $?)"
+  # A failure counts as a failed attempt (the next round tries again, then the issue becomes agent-blocked).
+  # Without credentials, like the agent: an install runs scripts from the worktree, which may hold the agent's code
+  without_credentials bash -c "$AGENT_SETUP_CMD" || die "#$n: AGENT_SETUP_CMD failed in $wt (exit $?)"
 fi
 # For the Stop hook (verify-hook.sh --loop) that agent_settings passes
 export AGENT_LOOP_RUN=1 AGENT_VERIFY_CMD AGENT_BASE_BRANCH

@@ -101,7 +101,7 @@ Outcomes are judged by GitHub's real state (is a PR open?), not by what the agen
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AGENT_SETUP_CMD` | empty | Runs in each worktree before the agent (dependency install) |
+| `AGENT_SETUP_CMD` | empty | Runs in each worktree before the agent (dependency install), in the same scrubbed environment as the agent |
 | `AGENT_VERIFY_CMD` | empty | Checks that must pass before a PR; told to the agent and run by a Stop hook before it may finish |
 | `AGENT_VERIFY_TIMEOUT` | `600` | Seconds the Stop hook may spend on `AGENT_VERIFY_CMD` |
 | `AGENT_LANGUAGE` | `English` | Language of commits, PRs, summaries and agent comments |
@@ -129,7 +129,7 @@ Outcomes are judged by GitHub's real state (is a PR open?), not by what the agen
 | `AGENT_NOTIFY` | `1` | macOS notifications |
 | `AGENT_LOG_DAYS` | `14` | Log retention |
 | `AGENT_EXTRA_ALLOW`, `AGENT_EXTRA_DENY`, `AGENT_EXTRA_TRIAGE_DENY` | empty arrays | Extra permission rules (Claude Code `--allowedTools` / `--disallowedTools` syntax) |
-| `AGENT_SCRUB_ENV` | common cloud and token variables | Variables removed from the agents' environment |
+| `AGENT_SCRUB_ENV` | common cloud and token variables | Variables removed from the environment of the agents and of `AGENT_SETUP_CMD`. If the install needs one (e.g. `NPM_TOKEN` for a private registry), set this list without it |
 | `AGENT_CHILD_ENV` | `(AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null)` | `NAME=VALUE` pairs set for the agents |
 
 The branch name `agent/issue-<n>` and the label names are fixed.
@@ -149,7 +149,7 @@ These are best-effort defenses, **not a sandbox**: the agents run with your own 
 
 - **Whose words count**: text on GitHub becomes instructions to an agent, so the people who can write it are the trust boundary. Only comments from trusted authors (`AGENT_TRUSTED_ASSOCIATIONS`, by default the owner, organization members and collaborators, plus `AGENT_TRUSTED_USERS`) start a fix run or reach the fix prompt. Triage never adds `agent-ok` to an issue someone else opened; label it yourself after reading it. The agents still read whole issue and PR threads with `gh`, and the prompts tell them to treat other people's comments as information only, which is a weaker defense: on a public repository, read a thread before you label its issue `agent-ok`.
 - **Denied commands** (built in): `gh pr merge`, closing PRs or issues, label changes, `gh api`, `gh auth`, `gh repo/secret/variable/workflow/release`, force-push (including `+refspec`), `git rebase`, `git reset --hard`, `git worktree`. Patterns also match in the middle of a command line. Your project's deploy and production commands are **yours to add** in `AGENT_EXTRA_DENY`.
-- **Credentials**: the variables in `AGENT_SCRUB_ENV` are removed; `~/.aws`, `~/.ssh`, `~/.config/gh`, the macOS keychain and the main checkout's `.env`, `.env.local`, `.env.production` are unreadable to the agent (Read and Bash denies).
+- **Credentials**: the variables in `AGENT_SCRUB_ENV` are removed for the agents and for `AGENT_SETUP_CMD` (an install runs scripts from the worktree); `~/.aws`, `~/.ssh`, `~/.config/gh`, the macOS keychain and the main checkout's `.env`, `.env.local`, `.env.production` are unreadable to the agent (Read and Bash denies).
 - **MCP**: `--strict-mcp-config` means no MCP servers or claude.ai connectors are loaded.
 - **Isolation**: for anything beyond your own trusted repositories, run the loop as a separate OS user, in a VM or in a dev container, with a GitHub token limited to that repository.
 - **Main branch**: use branch protection so a PR is required.

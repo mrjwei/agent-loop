@@ -212,6 +212,15 @@ check "triage: agent-ok is added for a trusted author, never for a stranger's is
   "$(grep -E '^issue edit (6|10) ' "$GH_LOG" | tr '\n' ';' | sed 's/;$//')"
 check "triage: says why it refused" 1 "$(grep -c 'not adding agent-ok: #10 was opened by mallory' "$T/triage.out")"
 
+# --- work.sh: a fix run on PR #20 (issue 3) ---
+result '{"status":"fixed","summary":"nothing to change"}' >"$T/fix-result.jsonl"
+: >"$GH_LOG"
+# shellcheck disable=SC2016
+AWS_PROFILE=prod SETUP_OUT="$T/setup.out" AGENT_SETUP_CMD='echo "setup sees ${AWS_PROFILE:-nothing}" >"$SETUP_OUT"' \
+  FAKE_CLAUDE_RESULT="$T/fix-result.jsonl" "$B" "$ROOT/libexec/work.sh" 3 --fix >"$T/work.out" 2>&1
+check "work: a fix run finishes" 0 $?
+check "work: AGENT_SETUP_CMD runs without the scrubbed credentials" 'setup sees nothing' "$(cat "$T/setup.out" 2>/dev/null)"
+
 # --- CLI ---
 check "cli: version" "$(cat "$ROOT/VERSION")" "$("$ROOT/bin/agent-loop" version)"
 "$ROOT/bin/agent-loop" nope >/dev/null 2>&1; check "cli: unknown command exits 2" 2 $?
