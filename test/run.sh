@@ -58,8 +58,10 @@ esac
 EOF
 cat >"$T/bin/claude" <<'EOF'
 #!/usr/bin/env bash
-# Fake claude for test/run.sh: ignores the prompt and prints the stream in $FAKE_CLAUDE_RESULT
+# Fake claude for test/run.sh: ignores the prompt, runs $FAKE_CLAUDE_CMD (what the "agent" does in the worktree)
+# and prints the stream in $FAKE_CLAUDE_RESULT
 cat >/dev/null
+[ -z "${FAKE_CLAUDE_CMD:-}" ] || bash -c "$FAKE_CLAUDE_CMD" >/dev/null 2>&1
 cat "$FAKE_CLAUDE_RESULT"
 EOF
 chmod +x "$T/bin/gh" "$T/bin/claude"
@@ -88,8 +90,9 @@ node() { # number title labels-json extra-json
   echo ']}}}}'
 } >"$T/fixtures/page2.json"
 # Pull requests: an agent PR with a failing check, a fork PR and a PR on another branch, and a merged agent PR
-cat >"$T/fixtures/prs.json" <<'EOF'
-[{"number":20,"state":"OPEN","title":"a","headRefName":"agent/issue-3","headRefOid":"aaa","isCrossRepository":false,"mergeable":"MERGEABLE",
+git -C "$T/proj" push -q origin main:refs/heads/agent/issue-3
+sed "s/HEAD3/$(git -C "$T/proj" rev-parse HEAD)/" >"$T/fixtures/prs.json" <<'EOF'
+[{"number":20,"state":"OPEN","title":"a","headRefName":"agent/issue-3","headRefOid":"HEAD3","isCrossRepository":false,"mergeable":"MERGEABLE",
   "statusCheckRollup":[{"name":"test","status":"COMPLETED","conclusion":"FAILURE"}]},
  {"number":21,"state":"OPEN","title":"b","headRefName":"agent/issue-6","headRefOid":"bbb","isCrossRepository":true,"mergeable":"MERGEABLE","statusCheckRollup":[]},
  {"number":22,"state":"OPEN","title":"c","headRefName":"feature/x","headRefOid":"ccc","isCrossRepository":false,"mergeable":"MERGEABLE","statusCheckRollup":[]},
@@ -219,7 +222,7 @@ check "triage: agent-ok is added for a trusted author, never for a stranger's is
   "$(grep -E '^issue edit (6|10) ' "$GH_LOG" | tr '\n' ';' | sed 's/;$//')"
 check "triage: says why it refused" 1 "$(grep -c 'not adding agent-ok: #10 was opened by mallory' "$T/triage.out")"
 
-# --- work.sh: a fix run on PR #20 (issue 3) ---
+# --- work.sh: fix runs on PR #20 (issue 3), which has a failing check ---
 result '{"status":"fixed","summary":"nothing to change"}' >"$T/fix-result.jsonl"
 : >"$GH_LOG"
 # shellcheck disable=SC2016
@@ -227,6 +230,12 @@ AWS_PROFILE=prod SETUP_OUT="$T/setup.out" AGENT_SETUP_CMD='echo "setup sees ${AW
   FAKE_CLAUDE_RESULT="$T/fix-result.jsonl" "$B" "$ROOT/libexec/work.sh" 3 --fix >"$T/work.out" 2>&1
 check "work: a fix run finishes" 0 $?
 check "work: AGENT_SETUP_CMD runs without the scrubbed credentials" 'setup sees nothing' "$(cat "$T/setup.out" 2>/dev/null)"
+check "work: 'fixed' with nothing pushed and the check still failing goes to a human" '1|1' \
+  "$(grep -c '^issue edit 3 --add-label agent-blocked' "$GH_LOG")|$(grep -c '^pr comment 20 .*pushed nothing.*failing check `test`' "$GH_LOG")"
+: >"$GH_LOG"
+FAKE_CLAUDE_CMD='git -c user.email=t@t -c user.name=t commit -q --allow-empty -m fix && git push -q origin HEAD' \
+  FAKE_CLAUDE_RESULT="$T/fix-result.jsonl" "$B" "$ROOT/libexec/work.sh" 3 --fix >"$T/work.out" 2>&1
+check "work: 'fixed' with a push is left to the next round's checks" '0|0' "$?|$(grep -c 'agent-blocked' "$GH_LOG")"
 
 # --- loop.sh: one round. PR #9 (issue 1) was merged, but issue 1 is still open ---
 tick() { AGENT_FROM_COPY=1 "$B" "$ROOT/libexec/loop.sh" --tick --no-triage "$@" 2>&1; }
