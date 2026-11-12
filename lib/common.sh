@@ -100,18 +100,26 @@ WORKER_ALLOW=(
   ${AGENT_EXTRA_ALLOW[@]+"${AGENT_EXTRA_ALLOW[@]}"}
 )
 WORKER_DENY=(
-  # GitHub: merge, close, labels, raw API, tokens
+  # GitHub: merge, close, labels, raw API, tokens. Labels: the `gh label` command and the --label / --add-label /
+  # --remove-label options (not every command that mentions labels: `gh issue view --json labels` only reads)
   "Bash(*gh *pr merge*)" "Bash(*gh *pr close*)" "Bash(*gh *pr ready*)" "Bash(*gh *issue close*)"
-  "Bash(*gh *issue edit*)" "Bash(*gh *issue delete*)" "Bash(*gh api*)" "Bash(*gh *label*)" "Bash(*gh auth*)"
+  "Bash(*gh *issue edit*)" "Bash(*gh *issue delete*)" "Bash(*gh api*)" "Bash(*gh label*)" "Bash(*gh * label *)" "Bash(*gh *-label*)" "Bash(*gh auth*)"
   "Bash(*gh *repo *)" "Bash(*gh *secret*)" "Bash(*gh *variable*)" "Bash(*gh *workflow*)" "Bash(*gh *release*)"
   # git: rewriting history (including +refspec force-pushes) and worktree management
   "Bash(git push*--force*)" "Bash(git push* -f*)" "Bash(git push*+*)" "Bash(git rebase:*)"
   "Bash(git reset --hard:*)" "Bash(git worktree:*)"
-  # Credential stores (Read and Bash). The main checkout's .env files may hold production keys.
+  # git: pushing to the base branch, as a branch name or as the target of a refspec (branch protection is the real
+  # guard; this is a second layer)
+  "Bash(git push* ${AGENT_BASE_BRANCH})" "Bash(git push* ${AGENT_BASE_BRANCH} *)"
+  "Bash(git push*:${AGENT_BASE_BRANCH})" "Bash(git push*:${AGENT_BASE_BRANCH} *)"
+  "Bash(git push*:refs/heads/${AGENT_BASE_BRANCH}*)"
+  # Credential stores (Read and Bash). The main checkout's .env files may hold production keys: Read is denied for
+  # them, and Bash for commands that name them by absolute path or as .env.local / .env.production. (A relative
+  # path to a plain .env matches no rule; a rule for "*.env*" would also deny every command that mentions process.env.)
   "Read(~/.aws/**)" "Bash(*.aws/*)" "Read(~/.ssh/**)" "Read(~/.config/gh/**)" "Bash(*.config/gh*)"
   "Read(~/Library/Keychains/**)" "Bash(security *)" "Bash(*&& security *)"
   "Read(/${REPO}/.env)" "Read(/${REPO}/.env.local)" "Read(/${REPO}/.env.production)" "Read(/${REPO}/.env.*.local)"
-  "Bash(*.env.local*)" "Bash(*.env.production*)"
+  "Bash(*.env.local*)" "Bash(*.env.production*)" "Bash(*${REPO}/.env*)"
   ${AGENT_EXTRA_DENY[@]+"${AGENT_EXTRA_DENY[@]}"}
 )
 # The triage agent only reads. This also overrides the project's .claude/settings.json allows (git commit, push, ...).

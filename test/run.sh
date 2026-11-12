@@ -123,6 +123,14 @@ rm -f "$T/proj/.agent-loop.conf"
 . "$ROOT/lib/common.sh"
 set +e
 
+# --- Permission rules ---
+denied() { printf '%s\n' "${WORKER_DENY[@]}" | grep -Fxq -- "$1" && echo yes || echo no; }
+check "deny: shell commands that name the main checkout's .env files" yes "$(denied "Bash(*$REPO/.env*)")"
+check "deny: pushing to the base branch, by name or as a refspec target" 'yes yes yes' \
+  "$(denied 'Bash(git push* main)') $(denied 'Bash(git push*:main)') $(denied 'Bash(git push*:refs/heads/main*)')"
+check "deny: label changes, but not every command that mentions labels" 'yes yes yes no' \
+  "$(denied 'Bash(*gh label*)') $(denied 'Bash(*gh * label *)') $(denied 'Bash(*gh *-label*)') $(denied 'Bash(*gh *label*)')"
+
 # --- Prompt rendering ---
 printf 'a {{N}} b {{VAL}} {{new1}} {{UNSET}}.\n' >"$T/tpl.md"
 check "render: placeholders, symbols, lowercase refs kept" 'a 12 b x&y\1/z {{new1}} .' \
