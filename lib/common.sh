@@ -53,7 +53,7 @@ AGENT_PAUSE_AT_UTILIZATION=${AGENT_PAUSE_AT_UTILIZATION:-0.8} # stop starting ag
 
 AGENT_BASE_BRANCH=${AGENT_BASE_BRANCH:-}                  # default: origin's default branch, else main
 AGENT_WT_PREFIX=${AGENT_WT_PREFIX:-$(basename "$REPO")-agent} # worktrees are ../<prefix>-<issue>
-AGENT_SETUP_CMD=${AGENT_SETUP_CMD:-}                      # run in each worktree before the agent starts (e.g. dependency install)
+AGENT_SETUP_CMD=${AGENT_SETUP_CMD:-}                      # run in each worktree before the agent starts (e.g. dependency install), in the agents' environment
 AGENT_VERIFY_CMD=${AGENT_VERIFY_CMD:-}                    # checks that must pass before a PR (told to the agent; used by the Stop hook)
 AGENT_LANGUAGE=${AGENT_LANGUAGE:-English}                 # language of commits, PRs, summaries and agent comments
 AGENT_PROMPTS_DIR=${AGENT_PROMPTS_DIR:-.agent-loop/prompts} # project prompt overrides (relative to the repo root)
@@ -66,7 +66,7 @@ AGENT_CLEAN_REVIEW_USER=${AGENT_CLEAN_REVIEW_USER:-claude[bot]} # a "No issues f
 # adds agent-ok to their issues. On a public repository anyone can comment, so keep this to people you trust.
 AGENT_TRUSTED_ASSOCIATIONS=${AGENT_TRUSTED_ASSOCIATIONS:-OWNER MEMBER COLLABORATOR} # GitHub author associations, space-separated ('*' = everyone)
 AGENT_TRUSTED_USERS=${AGENT_TRUSTED_USERS:-$AGENT_CLEAN_REVIEW_USER} # space-separated logins trusted whatever their association (review bots)
-# Variables removed from the agents' environment (the agents run with your own permissions)
+# Variables removed from the environment of the agents and of AGENT_SETUP_CMD (both run with your own permissions)
 AGENT_SCRUB_ENV=${AGENT_SCRUB_ENV:-AWS_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GOOGLE_APPLICATION_CREDENTIALS AZURE_CLIENT_SECRET SUPABASE_ACCESS_TOKEN SUPABASE_DB_PASSWORD SUPABASE_SERVICE_ROLE_KEY VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID NPM_TOKEN}
 # Variables set in the agents' environment (config-file array of NAME=VALUE)
 [ -n "${AGENT_CHILD_ENV+x}" ] || AGENT_CHILD_ENV=(AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null)
