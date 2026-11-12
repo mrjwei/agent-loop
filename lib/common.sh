@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034  # the variables set here are used by the scripts that source this file
 # Shared configuration and functions for agent-loop. Sourced by every script in libexec/.
 # Written for macOS's stock bash 3.2 (no associative arrays, mapfile or `wait -n`).
 
