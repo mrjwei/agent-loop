@@ -3,6 +3,7 @@
 #   1. Clean up: remove the worktree, branches and state of PRs that were merged or closed. An issue that is still open
 #                after its PR was merged or closed loses agent-ok, so the same work does not start again
 #      Resume:   an agent-blocked issue answered by a trusted author loses agent-blocked (AGENT_AUTO_RESUME)
+#      Base check: while checks fail on the head of origin/<base>, step 4 does not start agents (an issue is opened once)
 #   2. Fix:      for an agent PR with a conflict, a failing check or new review feedback, run work.sh --fix
 #   3. Triage:   when nothing is ready to start and the base branch moved since the last triage, run triage.sh
 #   4. Start:    run work.sh in parallel for issues that are agent-ok with all dependencies closed, up to the free slots
@@ -148,6 +149,50 @@ phase_resume() {
   done
 }
 
+# --- Base branch checks ---
+# Two PRs that each pass can break the base branch together. While a check on the head of origin/<base> has failed (other
+# than AGENT_IGNORE_CHECKS), step 4 does not start agents (cleanup and fix go on); an issue and one notification are
+# made once per failing commit. Pending checks, and a base branch without checks, block nothing.
+BASE_FAILING=""
+phase_base_check() {
+  local sha checks fail green merged body title url cc
+  BASE_FAILING=""
+  sha=$(git -C "$REPO" rev-parse --verify -q "$BASE_REF") || return 0
+  checks=$(commit_checks "$sha")
+  fail=$(echo "$checks" | sed -n 's/^FAIL //p' | sort -u)
+  if [ -z "$fail" ]; then
+    # Finished and passing: remember it, to name the PRs merged since if a later commit fails
+    if echo "$checks" | grep -q '^OK ' && ! echo "$checks" | grep -q '^PENDING '; then
+      [ "$DRY" = 1 ] || echo "$sha" >"$STATE/base-last-green-sha"
+    fi
+    return 0
+  fi
+  BASE_FAILING=$(echo "$fail" | paste -sd, - | sed 's/,/, /g')
+  log "Checks are failing on $BASE_REF (${sha:0:7}): $BASE_FAILING. Not starting agents until they pass"
+  [ "$(cat "$STATE/base-failed-sha" 2>/dev/null)" = "$sha" ] && return 0   # this commit was reported already
+  green=$(cat "$STATE/base-last-green-sha" 2>/dev/null || true)
+  merged=$(base_merged_prs "$green" "$sha")
+  cc=$(mention)
+  title="Checks failing on $AGENT_BASE_BRANCH: $BASE_FAILING"
+  body="The checks on the head of \`$AGENT_BASE_BRANCH\` failed.
+
+- Commit: $sha
+- Failing checks: $(echo "$fail" | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g')
+
+No agent starts until the checks on \`$AGENT_BASE_BRANCH\` pass again (fix runs and cleanup continue). Revert, fix it by hand, or label this issue \`$L_OK\` to hand it to an agent; the loop resumes by itself when the head passes.
+
+$(if [ -n "$green" ]; then echo "Pull requests merged since the last commit that passed (${green:0:7}):"; else echo "The last commit that passed is not known. Pull requests merged with the head commit:"; fi)
+${merged:-- none found}${cc:+
+
+cc $cc}"
+  if url=$(run gh issue create --title "$title" --body "$body"); then
+    [ "$DRY" = 1 ] || echo "$sha" >"$STATE/base-failed-sha"
+    notify "Checks failing on $AGENT_BASE_BRANCH" "$BASE_FAILING. No agent starts until they pass." "$url"
+  else
+    log "could not open the issue for the failing base branch; trying again next round"
+  fi
+}
+
 # --- 2. Fix ---
 phase_fix() {
   local p n reasons sig
@@ -213,6 +258,7 @@ do_tick() {
   agent_prs >"$PRS_JSON"
   phase_cleanup
   phase_resume
+  phase_base_check
   if paused; then
     log "Paused by a usage limit until $(fmt_epoch "$(paused_until)"); not starting agents (resume now: agent-loop unpause)"
     return 0
@@ -227,13 +273,15 @@ do_tick() {
   fi
   phase_fix
   [ -z "$(candidates)" ] && phase_triage
-  paused || phase_launch   # if triage hit a limit, do not start anything either
+  paused || [ -n "$BASE_FAILING" ] || phase_launch   # if triage hit a limit, or the base branch is red, do not start anything
   log "Round done: agents running $(running_count)/${AGENT_MAX_PARALLEL}, open PRs $(jq length "$PRS_JSON"), ready to start $(candidates | wc -l | tr -d ' ')"
 }
 
 show_status() {
-  local f n
+  local f n failing
   paused && echo "== Paused by a usage limit until $(fmt_epoch "$(paused_until)") (resume now: agent-loop unpause)"
+  failing=$(base_failing_names)
+  [ -z "$failing" ] || echo "== Checks are failing on $BASE_REF ($failing): no agent starts until they pass"
   over_budget && echo "== Daily budget reached: no agent starts until tomorrow"
   echo "== Spend today: \$$(spend_today)$([ -n "$AGENT_DAILY_BUDGET" ] && echo " of \$${AGENT_DAILY_BUDGET} (AGENT_DAILY_BUDGET)" || echo ' (AGENT_DAILY_BUDGET is not set)')"
   echo "== Running agents"

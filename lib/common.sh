@@ -308,6 +308,40 @@ pr_feedback() { # pr since
          | select((.u == $clean and (.b | test("No issues found"))) | not)]'
 }
 
+# --- Checks on the base branch ---
+# One line per check on a commit: "OK|PENDING|FAIL <name>" (checks named in AGENT_IGNORE_CHECKS are left out). Reads both
+# check runs (GitHub Actions and apps) and commit statuses. A commit without checks gives no lines; an API error too.
+commit_checks() { # sha
+  local r; r=$(gh_repo)
+  {
+    gh api "repos/$r/commits/$1/check-runs" --paginate --jq '.check_runs[]
+      | "\(if .status != "completed" then "PENDING"
+            elif ((.conclusion // "") as $c | ["failure", "timed_out", "startup_failure", "action_required"] | index($c)) then "FAIL"
+            else "OK" end) \(.name)"'
+    gh api "repos/$r/commits/$1/status" --jq '.statuses[]
+      | "\(if .state == "pending" then "PENDING" elif (.state == "failure" or .state == "error") then "FAIL" else "OK" end) \(.context)"'
+  } 2>/dev/null | awk -v ig="$AGENT_IGNORE_CHECKS" 'BEGIN { n = split(ig, a, ","); for (i = 1; i <= n; i++) skip[a[i]] = 1 }
+    { name = $0; sub(/^[A-Z]+ /, "", name); if (!(name in skip)) print }' || true
+}
+
+# Names (comma-separated) of the failing checks on the head of origin/<base>; empty when none fail, when checks are
+# still pending, or when the base branch has no checks
+base_failing_names() {
+  local sha
+  sha=$(git -C "$REPO" rev-parse --verify -q "$BASE_REF") || return 0
+  commit_checks "$sha" | sed -n 's/^FAIL //p' | sort -u | paste -sd, - | sed 's/,/, /g'
+}
+
+# Pull requests merged into the base branch since a commit ("- #N title" lines). Without a known commit that passed (or
+# when it is not an ancestor of the head), only the PR that produced the head commit can be named.
+base_merged_prs() { # last_green_sha head_sha
+  local commits
+  if [ -n "$1" ] && git -C "$REPO" merge-base --is-ancestor "$1" "$2" 2>/dev/null; then commits=$(git -C "$REPO" rev-list "$1..$2")
+  else commits=$2; fi
+  gh pr list --state merged --base "$AGENT_BASE_BRANCH" --limit 50 --json number,title,mergeCommit 2>/dev/null |
+    jq -r --arg c "$commits" '($c | split("\n")) as $cs | .[] | select(.mergeCommit.oid as $o | $cs | index($o)) | "- #\(.number) \(.title)"' || true
+}
+
 # Why a PR needs a fix run (JSON). Takes one agent_prs entry and the time to read feedback from
 pr_fix_reasons() { # pr_json since
   local pr fb
