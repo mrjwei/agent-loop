@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # Set up the current project for agent-loop, or check the tools it needs.
-#   agent-loop init [--force] [--hook] [--no-labels] [--dry-run]
+#   agent-loop init [--force] [--hook] [--no-labels] [--no-workflow] [--dry-run]
 #   agent-loop doctor      (init.sh --check)
 #   agent-loop labels      (init.sh --labels-only)
 set -euo pipefail
 . "$(dirname "$0")/../lib/common.sh"
 
-mode=init force=0 hook=0 labels=1
+mode=init force=0 hook=0 labels=1 workflow=1
 for a in "$@"; do
   case "$a" in
     --force) force=1 ;;
     --hook) hook=1 ;;
     --no-hook) hook=0 ;;   # the default since the loop passes its own hook; kept for old scripts
     --no-labels) labels=0 ;;
+    --no-workflow) workflow=0 ;;
     --dry-run) DRY=1 ;;
     --check) mode=check ;;
     --labels-only) mode=labels ;;
@@ -96,6 +97,29 @@ detect_commands() {
   return 0
 }
 
+# The Claude Code review workflow. PRs the agents open run as the claude[bot] actor, which claude-code-action rejects
+# unless it is listed in allowed_bots ("Workflow initiated by non-human actor"). Install the workflow with that set, and
+# add the line to a workflow that /install-github-app already wrote without it.
+install_review_workflow() {
+  local dest="$REPO/.github/workflows/claude-code-review.yml" tmp
+  if [ ! -e "$dest" ] || [ "$force" = 1 ]; then put "$dest" <"$PKG_DIR/templates/claude-code-review.yml"; return 0; fi
+  if grep -q 'allowed_bots' "$dest"; then log "kept ${dest#"$REPO"/} (allowed_bots is already set)"; return 0; fi
+  if ! grep -q 'anthropics/claude-code-action' "$dest"; then log "kept ${dest#"$REPO"/} (it does not use claude-code-action)"; return 0; fi
+  if ! grep -Eq '^[[:space:]]*(claude_code_oauth_token|anthropic_api_key):' "$dest"; then
+    log "WARNING ${dest#"$REPO"/} has no allowed_bots: add  allowed_bots: 'claude'  under the action's with:, or PRs from the loop fail the review"; return 0
+  fi
+  if [ "$DRY" = 1 ]; then log "[dry-run] would add allowed_bots: 'claude' to ${dest#"$REPO"/}"; return 0; fi
+  tmp=$(mktemp "${TMPDIR:-/tmp}/agent-loop-wf.XXXXXX")
+  awk '{ print }
+    !done && match($0, /^[[:space:]]*(claude_code_oauth_token|anthropic_api_key):/) {
+      ind = $0; sub(/[^[:space:]].*$/, "", ind)
+      print ind "# PRs opened by Claude itself run as the claude[bot] actor, which the action rejects by default"
+      print ind "allowed_bots: '"'"'claude'"'"'"
+      done = 1 }' "$dest" >"$tmp" && cat "$tmp" >"$dest"
+  rm -f "$tmp"
+  log "added allowed_bots: 'claude' to ${dest#"$REPO"/}"
+}
+
 install_hook() {
   local dest="$REPO/.claude/hooks/agent-loop-verify.sh" settings="$REPO/.claude/settings.json"
   local cmd='"$CLAUDE_PROJECT_DIR"/.claude/hooks/agent-loop-verify.sh' new
@@ -135,6 +159,7 @@ export T_SETUP_CMD="$SETUP" T_VERIFY_CMD="$VERIFY" T_WT_PREFIX="$AGENT_WT_PREFIX
 render "$PKG_DIR/templates/agent-loop.conf" | put "$REPO/.agent-loop.conf"
 put "$PROMPTS_DIR/project.md" <"$PKG_DIR/templates/project.md"
 [ "$hook" = 1 ] && install_hook
+[ "$workflow" = 1 ] && install_review_workflow
 if [ "$labels" = 1 ]; then
   ensure_labels || log "could not create labels (is gh authenticated, and does the repo have a GitHub remote?)"
 fi
