@@ -26,6 +26,7 @@ Usage: agent-loop <command> [options]     (run inside the target project's git c
   unpause                 clear a usage-limit pause
   work <issue> [--fix]    run one issue by hand (implement, or fix its PR)
   triage [--dry-run]      compare plan files with issues and propose/apply issue changes
+  lessons [--days N]      why agents stopped and what reviewers asked for (default: 30 days), to turn into project rules
   labels                  create the agent-ok / agent-wip / agent-blocked / human labels
   version                 print the version
 
@@ -42,6 +43,7 @@ case "$cmd" in
   unpause) exec "$PKG/libexec/loop.sh" --unpause ;;
   work) exec "$PKG/libexec/work.sh" "$@" ;;
   triage) exec "$PKG/libexec/triage.sh" "$@" ;;
+  lessons) exec "$PKG/libexec/lessons.sh" "$@" ;;
   labels) exec "$PKG/libexec/init.sh" --labels-only ;;
   init) exec "$PKG/libexec/init.sh" "$@" ;;
   doctor) exec "$PKG/libexec/init.sh" --check ;;

@@ -61,6 +61,8 @@ case "$*" in
                     echo '{"u":"carol","a":"CONTRIBUTOR","t":"2026-03-02T01:00:00Z","b":"my opinion"}' ;;
       *issues/62/*) echo '{"u":"me","a":"OWNER","t":"2026-03-03T00:00:00Z","b":"🤖 agent: still on it"}' ;;
     esac ;;
+  "api --paginate repos/o/r/issues/20/comments"*) # PR 20: one fresh comment, with FAKE_PR20_COMMENT=1
+    [ -z "${FAKE_PR20_COMMENT:-}" ] || printf '{"u":"alice","a":"COLLABORATOR","t":"%s","where":"PR comment","b":"Please rename foo\\nsecond line"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" ;;
   "api --paginate repos/o/r/pulls/5/reviews"*)
     echo '{"u":"claude[bot]","a":"NONE","t":"2026-01-04T00:00:00Z","where":"review (COMMENTED)","b":"No issues found."}'
     echo '{"u":"claude[bot]","a":"NONE","t":"2026-01-06T00:00:00Z","where":"review (COMMENTED)","b":"Found a bug in bar"}'
@@ -486,6 +488,33 @@ check "work: a later fix round's prompt carries the previous fix's summary" 1 "$
 count_reset fixes 3
 check "prompts: the packaged implement and fix prompts have the resume placeholder" '1|1' \
   "$(grep -c '{{RESUME}}' "$ROOT/prompts/implement.md")|$(grep -c '{{RESUME}}' "$ROOT/prompts/fix.md")"
+: >"$GH_LOG"
+
+# --- Lessons: why agents stopped and what reviewers asked for (#25) ---
+rm -f "$LESSONS_FILE"
+block_issue 3 "needs a decision on the API" implement
+check "lessons: a blocked issue adds a line with time, issue, mode and reason" 'blocked|3|implement|needs a decision on the API' \
+  "$(jq -r '[.type, .issue, .mode, .reason] | join("|")' "$LESSONS_FILE")"
+check "lessons: the time is an ISO timestamp" 1 "$(jq -r '.time' "$LESSONS_FILE" | grep -c -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$')"
+DRY=1 block_issue 3 "dry run" implement 2>/dev/null
+check "lessons: a dry run records nothing" 1 "$(wc -l <"$LESSONS_FILE" | tr -d ' ')"
+result '{"status":"fixed","summary":"renamed"}' >"$T/fix2-result.jsonl"
+count_reset fixes 3
+FAKE_PR20_COMMENT=1 FAKE_CLAUDE_CMD='git -c user.email=t@t -c user.name=t commit -q --allow-empty -m fixl && git push -q origin HEAD' \
+  FAKE_CLAUDE_RESULT="$T/fix2-result.jsonl" "$B" "$ROOT/libexec/work.sh" 3 --fix >/dev/null 2>&1
+check "lessons: a finished fix run adds the feedback it was started for (author and first line)" 'feedback|3|fix|alice|Please rename foo' \
+  "$(jq -r 'select(.type == "feedback") | [.type, .issue, .mode, .author, .feedback] | join("|")' "$LESSONS_FILE")"
+check "lessons: the second line of a comment is not recorded" 0 "$(grep -c 'second line' "$LESSONS_FILE")"
+count_reset fixes 3
+echo '{"time":"2020-01-01T00:00:00Z","issue":9,"mode":"implement","type":"blocked","reason":"ancient reason"}' >>"$LESSONS_FILE"
+out=$("$ROOT/bin/agent-loop" lessons 2>&1)
+check "lessons: the command lists them newest first, with issue numbers and the path of project.md" '1|1|1|1' \
+  "$(echo "$out" | grep -c 'feedback from alice (PR comment): Please rename foo')|$(echo "$out" | grep -c '#3 .*implement .*stopped: needs a decision on the API')|$(echo "$out" | grep -c '.agent-loop/prompts/project.md')|$(echo "$out" | grep -v 'agent-loop/prompts' | grep '#' | head -1 | grep -c feedback)"
+check "lessons: --days leaves out older ones, and a longer period includes them" '0|1' \
+  "$(echo "$out" | grep -c 'ancient reason')|$("$ROOT/bin/agent-loop" lessons --days 100000 | grep -c 'ancient reason')"
+rm -f "$LESSONS_FILE"
+check "lessons: with nothing recorded the command says so" 1 "$("$ROOT/bin/agent-loop" lessons | grep -c 'nothing recorded yet')"
+"$ROOT/bin/agent-loop" lessons --days x >/dev/null 2>&1; check "lessons: a bad --days is refused" 1 $?
 : >"$GH_LOG"
 
 # --- CLI ---

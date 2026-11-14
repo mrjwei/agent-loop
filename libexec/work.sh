@@ -49,7 +49,7 @@ export T_N="$n" T_BRANCH="$br" T_WT="$wt" T_MARKER="$AGENT_MARKER" T_PR="$pr" T_
 if [ "$mode" = implement ]; then
   # The previous run may have died early (e.g. setup failed): the attempt limit applies to that too
   if [ "$(count_get attempts "$n")" -ge "$AGENT_MAX_ATTEMPTS" ]; then
-    block_issue "$n" "No PR was opened after ${AGENT_MAX_ATTEMPTS} attempts. Logs: .git/agent-loop/logs/issue-$n-*"
+    block_issue "$n" "No PR was opened after ${AGENT_MAX_ATTEMPTS} attempts. Logs: .git/agent-loop/logs/issue-$n-*" implement
     exit 0
   fi
   label_add "$n" "$L_WIP"
@@ -191,11 +191,11 @@ if [ "$mode" = implement ]; then
     exit 75
   fi
   if [ "$status" = blocked ]; then
-    block_issue "$n" "${reason:-No reason was given} (${resume_hint})"
+    block_issue "$n" "${reason:-No reason was given} (${resume_hint})" implement
     exit 0
   fi
   if [ "$(count_get attempts "$n")" -ge "$AGENT_MAX_ATTEMPTS" ]; then
-    block_issue "$n" "No PR was opened after ${AGENT_MAX_ATTEMPTS} attempts. ${reason:-$summary} (${resume_hint})"
+    block_issue "$n" "No PR was opened after ${AGENT_MAX_ATTEMPTS} attempts. ${reason:-$summary} (${resume_hint})" implement
     exit 0
   fi
   log "#$n: no PR is open. Will try again in the next round"
@@ -213,6 +213,7 @@ case "$status" in
   fixed | blocked)
     # Finished: advance the feedback start time and remember the current state (so the same reasons do not start another run)
     stamp_set handled "$n" "$started"
+    lesson_feedback "$n" "$(echo "$reasons" | jq -c .feedback)"   # what the reviewers asked for, for `agent-loop lessons`
     pr_json=$(agent_prs | jq -c --argjson n "$n" '.[] | select(.issue == $n)')
     if [ -z "$pr_json" ]; then log "#$n: PR #$pr is no longer open; nothing more to do"; exit 0; fi
     after=$(pr_fix_reasons "$pr_json" "$started")
@@ -226,13 +227,13 @@ case "$status" in
 esac
 if [ "$status" = blocked ]; then
   run gh pr comment "$pr" --body "$AGENT_MARKER Stopped fixing this. ${reason:-$summary}" >/dev/null
-  block_issue "$n" "PR #$pr: ${reason:-$summary} (${resume_hint})"
+  block_issue "$n" "PR #$pr: ${reason:-$summary} (${resume_hint})" fix
 elif [ "$(git ls-remote origin "refs/heads/$br" | cut -f1)" = "$head_before" ] &&
   [ "$(echo "$after" | jq '.conflict or (.failing | length > 0)')" = true ]; then
   # It reported "fixed" but pushed nothing, and the PR still has a conflict or a failing check. The state above is
   # remembered as handled, so no further fix run would start: hand it to a human instead of leaving the PR to wait.
   left=$(echo "$after" | jq -r '[(if .conflict then "merge conflicts" else empty end), (.failing[] | "failing check `\(.)`")] | join(", ")')
   run gh pr comment "$pr" --body "$AGENT_MARKER The fix run pushed nothing, and this PR still has: ${left}. Waiting for a human. ${summary}" >/dev/null
-  block_issue "$n" "PR #$pr still has ${left}, and the last fix run pushed nothing (it reported: ${summary:-no summary}). If a check is flaky, re-run it; otherwise push a fix or say what to do. (${resume_hint})"
+  block_issue "$n" "PR #$pr still has ${left}, and the last fix run pushed nothing (it reported: ${summary:-no summary}). If a check is flaky, re-run it; otherwise push a fix or say what to do. (${resume_hint})" fix
 fi
 exit 0
