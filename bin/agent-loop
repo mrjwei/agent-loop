@@ -15,13 +15,15 @@ usage() {
   cat <<'EOF'
 Usage: agent-loop <command> [options]     (run inside the target project's git checkout)
 
-  init [--force] [--hook] [--no-labels] [--dry-run]
-                          set up the current project (config, prompts, labels; --hook also adds the
-                          verify Stop hook to .claude/settings.json for interactive sessions)
-  doctor                  check the tools the loop needs
+  init [--force] [--hook] [--workflows] [--plan] [--no-labels] [--dry-run]
+                          set up the current project (config, prompts, labels; --hook also adds the verify Stop
+                          hook to .claude/settings.json for interactive sessions; --workflows writes the review
+                          workflow .github/workflows/claude-code-review.yml; --plan writes docs/plans/TEMPLATE.md)
+  doctor                  check the tools the loop needs, and the GitHub account it acts as
+  plan-lint [files...]    check plan files (default: AGENT_PLANS_GLOB) for items triage can use; exit 1 on errors
   start [--once] [--dry-run] [--no-triage]
                           run the loop (Ctrl-C to stop; --dry-run prints what it would do)
-  status                  running agents, agent PRs, blocked issues, issues ready to start
+  status                  the account it acts as, running agents, agent PRs (with their risk), blocked and ready issues
   kill                    stop running agents (worktrees stay; the next run continues from them)
   unpause                 clear a usage-limit pause
   work <issue> [--fix]    run one issue by hand (implement, or fix its PR)
@@ -29,7 +31,7 @@ Usage: agent-loop <command> [options]     (run inside the target project's git c
   stats [--days N] [--json|--digest]
                           outcomes, turns and cost of the finished runs (default 7 days); --digest is the daily text
   lessons [--days N]      why agents stopped and what reviewers asked for (default: 30 days), to turn into project rules
-  labels                  create the agent-ok / agent-wip / agent-blocked / human / agent-automerge labels
+  labels                  create the agent-ok / agent-wip / agent-blocked / human / agent-automerge / risk:high labels
   version                 print the version
 
 Configuration lives in .agent-loop.conf at the project root. See the README.
@@ -47,6 +49,7 @@ case "$cmd" in
   triage) exec "$PKG/libexec/triage.sh" "$@" ;;
   stats) exec "$PKG/libexec/stats.sh" "$@" ;;
   lessons) exec "$PKG/libexec/lessons.sh" "$@" ;;
+  plan-lint) exec "$PKG/libexec/plan-lint.sh" "$@" ;;
   labels) exec "$PKG/libexec/init.sh" --labels-only ;;
   init) exec "$PKG/libexec/init.sh" "$@" ;;
   doctor) exec "$PKG/libexec/init.sh" --check ;;

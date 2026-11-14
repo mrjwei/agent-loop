@@ -178,7 +178,7 @@ jq -c ".structured_output.actions[:$AGENT_TRIAGE_MAX_ACTIONS][]" "$out" | while 
         args+=(--body-file "$tmp/body-$num")
       fi
       add=$(echo "$a" | jq -r '.add_labels[]?' | filter_labels)
-      rem=$(echo "$a" | jq -r '.remove_labels[]?' | grep -vx -e "$L_HUMAN" -e "$L_WIP" -e "$L_BLOCKED" -e "$L_AUTOMERGE" || true)
+      rem=$(echo "$a" | jq -r '.remove_labels[]?' | grep -vx -e "$L_HUMAN" -e "$L_WIP" -e "$L_BLOCKED" -e "$L_AUTOMERGE" -e "$L_RISK_HIGH" || true)
       if [ "$cur_human" = true ] || echo "$add" | grep -qx "$L_HUMAN"; then
         echo "$add" | grep -qx "$L_OK" && log "  not adding $L_OK to a $L_HUMAN issue"
         add=$(echo "$add" | grep -vx "$L_OK" || true)

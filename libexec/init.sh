@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # Set up the current project for agent-loop, or check the tools it needs.
-#   agent-loop init [--force] [--hook] [--no-labels] [--dry-run]
+#   agent-loop init [--force] [--hook] [--workflows] [--plan] [--no-labels] [--dry-run]
 #   agent-loop doctor      (init.sh --check)
 #   agent-loop labels      (init.sh --labels-only)
 set -euo pipefail
 . "$(dirname "$0")/../lib/common.sh"
 
-mode=init force=0 hook=0 labels=1
+mode=init force=0 hook=0 labels=1 workflows=0 plan=0
 for a in "$@"; do
   case "$a" in
     --force) force=1 ;;
     --hook) hook=1 ;;
     --no-hook) hook=0 ;;   # the default since the loop passes its own hook; kept for old scripts
+    --workflows) workflows=1 ;;
+    --plan) plan=1 ;;
     --no-labels) labels=0 ;;
     --dry-run) DRY=1 ;;
     --check) mode=check ;;
@@ -21,6 +23,22 @@ for a in "$@"; do
 done
 export DRY=${DRY:-0}
 
+# Who the loop acts as, and whether that is a good account for it (README: "Run the loop as a machine account")
+check_account() {
+  local me perm
+  me=$(gh_user)
+  [ -n "$me" ] || { echo "info     could not read the GitHub user gh acts as"; return 0; }
+  echo "info     the loop acts as GitHub user $me"
+  if [ "$AGENT_NOTIFY" = 1 ] && same_login "$me" "$AGENT_NOTIFY_USER"; then
+    echo "WARNING  the loop's gh user ($me) is AGENT_NOTIFY_USER: GitHub does not notify you of your own mentions, so the comments on blocked issues and opened PRs stay silent${AGENT_NOTIFY_CMD:+ (AGENT_NOTIFY_CMD still works)}. Run the loop as a machine account (see the README)"
+  fi
+  perm=$(gh repo view --json viewerPermission -q .viewerPermission 2>/dev/null || true)
+  if [ "$perm" = ADMIN ]; then
+    echo "WARNING  $me has admin permission on this repository, and the loop holds its token. Run the loop with a token that can write but not administer (see the README: \"Run the loop as a machine account\")"
+  fi
+  return 0
+}
+
 check_prereqs() {
   local t bad=0
   for t in git jq gh claude; do
@@ -28,7 +46,7 @@ check_prereqs() {
     else echo "MISSING  $t"; bad=1; fi
   done
   if command -v gh >/dev/null 2>&1; then
-    if gh auth status >/dev/null 2>&1; then echo "ok       gh is authenticated"
+    if gh auth status >/dev/null 2>&1; then echo "ok       gh is authenticated"; check_account
     else echo "WARNING  gh is not authenticated (run: gh auth login)"; fi
   fi
   if ! git rev-parse --path-format=absolute --git-common-dir >/dev/null 2>&1; then
@@ -135,6 +153,14 @@ export T_SETUP_CMD="$SETUP" T_VERIFY_CMD="$VERIFY" T_WT_PREFIX="$AGENT_WT_PREFIX
 render "$PKG_DIR/templates/agent-loop.conf" | put "$REPO/.agent-loop.conf"
 put "$PROMPTS_DIR/project.md" <"$PKG_DIR/templates/project.md"
 [ "$hook" = 1 ] && install_hook
+# The review workflow (see "Review workflow" in the README); an existing file is left alone unless --force
+if [ "$workflows" = 1 ]; then
+  put "$REPO/.github/workflows/claude-code-review.yml" <"$PKG_DIR/templates/github/claude-code-review.yml"
+fi
+# The plan template. `status: template` keeps triage and plan-lint from reading the example items as a plan.
+if [ "$plan" = 1 ]; then
+  sed 's/^status: active$/status: template/' "$PKG_DIR/templates/plan.md" | put "$REPO/docs/plans/TEMPLATE.md"
+fi
 if [ "$labels" = 1 ]; then
   ensure_labels || log "could not create labels (is gh authenticated, and does the repo have a GitHub remote?)"
 fi
@@ -149,3 +175,17 @@ Done. Next steps:
   4. Try it without changes or cost:   agent-loop start --once --dry-run --no-triage
   5. Label one small issue 'agent-ok' and run:   agent-loop start --no-triage
 EOF
+if [ "$workflows" = 1 ]; then
+  cat <<'EOF'
+
+The review workflow is in .github/workflows/claude-code-review.yml. It needs the repository secret CLAUDE_CODE_OAUTH_TOKEN and
+the Claude GitHub App. See "Review workflow" in the README for AGENT_IGNORE_CHECKS, AGENT_CLEAN_REVIEW_USER and
+AGENT_AUTOMERGE_REQUIRE_REVIEW.
+EOF
+fi
+if [ "$plan" = 1 ]; then
+  cat <<'EOF'
+
+The plan template is docs/plans/TEMPLATE.md. Copy it to docs/plans/<name>.md for a real plan and check it with: agent-loop plan-lint
+EOF
+fi

@@ -56,6 +56,12 @@ AGENT_AUTO_RESUME=${AGENT_AUTO_RESUME:-1}                 # a trusted author's a
 AGENT_AUTOMERGE=${AGENT_AUTOMERGE:-1}                     # 0 ignores the agent-automerge label everywhere
 AGENT_AUTOMERGE_METHOD=${AGENT_AUTOMERGE_METHOD:-squash}  # squash | merge | rebase
 AGENT_AUTOMERGE_REQUIRE_REVIEW=${AGENT_AUTOMERGE_REQUIRE_REVIEW:-} # login whose latest review/comment must be clean before the loop merges (e.g. a review bot)
+AGENT_AUTOMERGE_POLICY=${AGENT_AUTOMERGE_POLICY:-label}   # label | shadow | risk (see README "Auto-merge")
+AGENT_AUTOMERGE_MAX_LINES=${AGENT_AUTOMERGE_MAX_LINES:-300} # a low-risk PR changes at most this many lines (additions plus deletions)
+# Globs (space-separated; the syntax of Touches:) of the paths that make a PR high-risk, and of the files that are tests.
+# Empty means none, so these are tested for being set, not for being empty.
+[ -n "${AGENT_RISK_PATHS+x}" ] || AGENT_RISK_PATHS='.github/** .agent-loop/** .agent-loop.conf CLAUDE.md */CLAUDE.md docs/plans/** docs/decisions/** package.json */package.json pnpm-lock.yaml */pnpm-lock.yaml package-lock.json */package-lock.json yarn.lock */yarn.lock pyproject.toml */pyproject.toml uv.lock */uv.lock requirements*.txt */requirements*.txt go.mod */go.mod go.sum */go.sum Cargo.toml */Cargo.toml Cargo.lock */Cargo.lock'
+[ -n "${AGENT_TEST_PATHS+x}" ] || AGENT_TEST_PATHS='test/** tests/** *_test.* *.test.* *.spec.* */test_*.py'
 AGENT_NOTIFY=${AGENT_NOTIFY:-1}                           # 0 turns off every notification (the @mention comments and AGENT_NOTIFY_CMD)
 AGENT_NOTIFY_USER=${AGENT_NOTIFY_USER:-}                  # GitHub login mentioned in the loop's comments on blocked issues and opened PRs
 AGENT_NOTIFY_CMD=${AGENT_NOTIFY_CMD:-}                    # command run with the title and body as arguments (ntfy, Pushover, a Slack webhook, ...)
@@ -101,6 +107,7 @@ JQ_TRUSTED='def trusted($u; $a):
 AGENT_MARKER='🤖 agent:'   # comments that start with this are the agent's own and never count as "new feedback"
 L_OK=agent-ok L_WIP=agent-wip L_BLOCKED=agent-blocked L_HUMAN=human
 L_AUTOMERGE=agent-automerge   # set only by a person; the loop merges the PR of such an issue when every condition holds
+L_RISK_HIGH=risk:high         # a person (or triage, from a plan's "Risk: high") marks an issue whose PR must never be merged automatically
 
 mkdir -p "$STATE/running" "$STATE/count" "$STATE/stamp" "$STATE/logs"
 
@@ -219,14 +226,17 @@ label_remove() { run gh issue edit "$1" --remove-label "$2" >/dev/null 2>&1 || t
 issue_comment() { run gh issue comment "$1" --body "$AGENT_MARKER $2" >/dev/null; }
 
 ensure_labels() {
-  local have l
+  local have l name color
   have=$(gh label list --limit 200 --json name -q '.[].name')
-  for l in "$L_OK:07a540:An agent may work on this" "$L_WIP:fbca04:An agent is working on this, or its PR awaits review" \
-    "$L_BLOCKED:b60205:The agent stopped and needs a human decision (answer in a comment; the loop removes this label, or remove it yourself)" \
-    "$L_HUMAN:0e8a16:Work only a person can do (agent-ok is never added)" \
-    "$L_AUTOMERGE:5319e7:Set by a person only: the loop merges this issue's PR itself once every condition holds"; do
-    echo "$have" | grep -qx "${l%%:*}" && continue
-    run gh label create "${l%%:*}" --color "$(echo "$l" | cut -d: -f2)" --description "${l#*:*:}" >/dev/null
+  for l in "$L_OK|07a540|An agent may work on this" "$L_WIP|fbca04|An agent is working on this, or its PR awaits review" \
+    "$L_BLOCKED|b60205|The agent stopped and needs a human decision (answer in a comment; the loop removes this label, or remove it yourself)" \
+    "$L_HUMAN|0e8a16|Work only a person can do (agent-ok is never added)" \
+    "$L_AUTOMERGE|5319e7|Set by a person only: the loop merges this issue's PR itself once every condition holds" \
+    "$L_RISK_HIGH|d93f0b|The PR of this issue is never merged automatically"; do
+    name=${l%%|*}
+    echo "$have" | grep -qxF -- "$name" && continue
+    color=${l#*|}; color=${color%%|*}
+    run gh label create "$name" --color "$color" --description "${l#*|*|}" >/dev/null
   done
 }
 
@@ -306,6 +316,85 @@ globs_overlap() { # a b: could one path match both?
   return 1
 }
 
+# Does a file path match a glob? Same syntax as Touches: (* ? [...], a * also matches a /, a trailing / means everything below)
+path_matches() { # path glob
+  local g; g=$(glob_norm "$2")
+  # shellcheck disable=SC2254  # the pattern is the point
+  case "$1" in $g) return 0 ;; esac
+  return 1
+}
+# The first of a list of globs (space-separated) that a path matches, printed; fails when none does
+first_glob_match() { # path "glob glob ..."
+  local g globs
+  read -r -a globs <<<"$2"
+  for g in ${globs[@]+"${globs[@]}"}; do
+    if path_matches "$1" "$g"; then printf '%s' "$g"; return 0; fi
+  done
+  return 1
+}
+
+# --- Risk of a PR, read from its diff (no model call) ---
+# The changed files of a PR as a JSON array [{f: path, p: previous path or "", s: status, a: additions, d: deletions}], cached
+# per head commit. Fails when GitHub does not answer. (REST rather than `gh pr view --json files`: the status says which
+# files were deleted or renamed.)
+pr_changed_files() { # pr head
+  local cache="$STATE/pr-files/$1-$2.json" r files
+  if [ -s "$cache" ]; then cat "$cache"; return 0; fi
+  r=$(gh_repo)
+  files=$(gh api --paginate "repos/$r/pulls/$1/files" \
+    --jq '.[] | {f: .filename, p: (.previous_filename // ""), s: .status, a: .additions, d: .deletions}' 2>/dev/null | jq -sc .) || return 1
+  [ "$(echo "$files" | jq 'length' 2>/dev/null || echo 0)" -gt 0 ] || return 1
+  mkdir -p "$STATE/pr-files"
+  printf '%s\n' "$files" >"$cache"
+  printf '%s\n' "$files"
+}
+
+# Facts about a diff (the files JSON of pr_changed_files on stdin), one per line:
+#   L:<n>        lines changed (additions plus deletions)
+#   H:<reason>   a changed file matches AGENT_RISK_PATHS (a "hard" reason: it stops even a PR a person labeled agent-automerge)
+#   S:<reason>   too many lines (AGENT_AUTOMERGE_MAX_LINES), a test file deleted, or more lines removed from test files than added
+#                (a "soft" reason: it only keeps a PR from being merged on the strength of being low-risk)
+diff_risk() {
+  local s a d f p x g lines=0 tadd=0 tdel=0 nrisk=0 shown="" deleted="" ftest ptest
+  while IFS=$'\t' read -r s a d f p; do
+    [ -n "$f" ] || continue
+    lines=$((lines + a + d))
+    for x in "$f" "$p"; do
+      [ "$x" != - ] || continue
+      if g=$(first_glob_match "$x" "$AGENT_RISK_PATHS"); then
+        nrisk=$((nrisk + 1))
+        [ "$nrisk" -gt 3 ] || shown="$shown${shown:+, }$x (matches $g)"
+        break
+      fi
+    done
+    ftest=0 ptest=0
+    first_glob_match "$f" "$AGENT_TEST_PATHS" >/dev/null && ftest=1
+    if [ "$p" != - ]; then first_glob_match "$p" "$AGENT_TEST_PATHS" >/dev/null && ptest=1; fi
+    if [ "$ftest" = 1 ] || [ "$ptest" = 1 ]; then tadd=$((tadd + a)); tdel=$((tdel + d)); fi
+    # a test file that is gone: removed, or renamed to a path that is not a test file
+    if [ "$s" = removed ] && [ "$ftest" = 1 ]; then deleted="$deleted${deleted:+, }$f"; fi
+    if [ "$ptest" = 1 ] && [ "$ftest" = 0 ]; then deleted="$deleted${deleted:+, }$p"; fi
+  done < <(jq -r '.[] | [.s, .a, .d, .f, (if .p == "" then "-" else .p end)] | @tsv')
+  echo "L:$lines"
+  if [ "$nrisk" -gt 0 ]; then echo "H:changes a high-risk path ($shown$([ "$nrisk" -gt 3 ] && echo ", and $((nrisk - 3)) more"))"; fi
+  if [ "$lines" -gt "$AGENT_AUTOMERGE_MAX_LINES" ]; then echo "S:$lines lines changed (AGENT_AUTOMERGE_MAX_LINES=$AGENT_AUTOMERGE_MAX_LINES)"; fi
+  if [ -n "$deleted" ]; then echo "S:deletes the test file(s) $deleted"; fi
+  if [ "$tdel" -gt "$tadd" ]; then echo "S:removes $tdel lines from test files and adds only $tadd"; fi
+  return 0
+}
+
+# Join lines with "; " (for log lines and comments)
+join_lines() { awk 'NF { if (n++) printf "; "; printf "%s", $0 } END { print "" }'; }
+
+# The GitHub user the loop acts as (the account of `gh`, or of GH_TOKEN)
+gh_user() { gh api user -q .login 2>/dev/null || true; }
+# Are two GitHub logins the same user? (case-insensitive, a leading @ ignored; never true when one is empty)
+same_login() {
+  local a b
+  a=$(printf '%s' "${1#@}" | tr '[:upper:]' '[:lower:]'); b=$(printf '%s' "${2#@}" | tr '[:upper:]' '[:lower:]')
+  [ -n "$a" ] && [ "$a" = "$b" ]
+}
+
 has_label() { # snapshot.json issue label
   jq -e --argjson n "$2" --arg l "$3" '.[] | select(.number == $n) | .labels | index($l)' "$1" >/dev/null
 }
@@ -331,14 +420,15 @@ last_done_pr() { # branch
     -q '[.[] | select((.isCrossRepository | not) and .state != "OPEN")] | max_by(.number) // empty | "\(.number) \(.state)"'
 }
 
-# New feedback on a PR since a timestamp. Only from trusted authors (AGENT_TRUSTED_ASSOCIATIONS / AGENT_TRUSTED_USERS):
+# New feedback on a PR since a timestamp. A comment counts from the time it was last edited (updated_at): a review bot that keeps
+# one "sticky" comment and updates it in place on every push would otherwise never be heard again. Only from trusted authors (AGENT_TRUSTED_ASSOCIATIONS / AGENT_TRUSTED_USERS):
 # the text goes into the fix prompt, so nobody else may put words there. Also excludes ignored bots, the agent's own
 # comments and reviews with no comment
 pr_feedback() { # pr since
   local r; r=$(gh_repo)
   {
-    gh api --paginate "repos/$r/issues/$1/comments" --jq '.[] | {u: .user.login, a: .author_association, t: .created_at, where: "PR comment", b: (.body // "")}'
-    gh api --paginate "repos/$r/pulls/$1/comments" --jq '.[] | {u: .user.login, a: .author_association, t: .created_at, where: "\(.path):\(.line // .original_line // "")", b: (.body // "")}'
+    gh api --paginate "repos/$r/issues/$1/comments" --jq '.[] | {u: .user.login, a: .author_association, t: (.updated_at // .created_at), where: "PR comment", b: (.body // "")}'
+    gh api --paginate "repos/$r/pulls/$1/comments" --jq '.[] | {u: .user.login, a: .author_association, t: (.updated_at // .created_at), where: "\(.path):\(.line // .original_line // "")", b: (.body // "")}'
     gh api --paginate "repos/$r/pulls/$1/reviews" --jq '.[] | {u: .user.login, a: .author_association, t: .submitted_at, where: "review (\(.state))", b: (.body // "")}'
   } | jq -s --arg since "$2" --arg m "$AGENT_MARKER" --arg ign "$AGENT_IGNORE_FEEDBACK_USERS" --arg clean "$AGENT_CLEAN_REVIEW_USER" \
     --arg assoc "$AGENT_TRUSTED_ASSOCIATIONS" --arg users "$AGENT_TRUSTED_USERS" "$JQ_TRUSTED"'
@@ -384,14 +474,15 @@ base_merged_prs() { # last_green_sha head_sha
 }
 
 # Is the latest review or comment of a login on a PR clean, i.e. a "No issues found" like AGENT_CLEAN_REVIEW_USER's, and
-# newer than the PR's head commit? (A review that predates the latest commit does not cover the code that would be merged.)
+# newer than the PR's head commit? (A review that predates the latest commit does not cover the code that would be merged.
+# A comment is as new as its last edit, so a sticky comment updated after the last push counts.)
 review_is_clean() { # pr head_sha login
   local r date
   r=$(gh_repo)
   date=$(gh api "repos/$r/commits/$2" --jq .commit.committer.date 2>/dev/null) && [ -n "$date" ] || return 1
   {
-    gh api --paginate "repos/$r/issues/$1/comments" --jq '.[] | {u: .user.login, t: .created_at, b: (.body // "")}'
-    gh api --paginate "repos/$r/pulls/$1/comments" --jq '.[] | {u: .user.login, t: .created_at, b: (.body // "")}'
+    gh api --paginate "repos/$r/issues/$1/comments" --jq '.[] | {u: .user.login, t: (.updated_at // .created_at), b: (.body // "")}'
+    gh api --paginate "repos/$r/pulls/$1/comments" --jq '.[] | {u: .user.login, t: (.updated_at // .created_at), b: (.body // "")}'
     gh api --paginate "repos/$r/pulls/$1/reviews" --jq '.[] | {u: .user.login, t: .submitted_at, b: (.body // "")}'
   } | jq -s -e --arg u "$3" --arg d "$date" '[.[] | select(.u == $u)] | sort_by(.t) | last
       | select(. != null) | select(.t >= $d) | select(.b | test("No issues found"))' >/dev/null
