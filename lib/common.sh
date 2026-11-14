@@ -50,6 +50,7 @@ AGENT_TRIAGE_MAX_TURNS=${AGENT_TRIAGE_MAX_TURNS:-80}
 AGENT_TRIAGE_MAX_ACTIONS=${AGENT_TRIAGE_MAX_ACTIONS:-15}  # triage changes applied per run
 AGENT_VERIFY_TIMEOUT=${AGENT_VERIFY_TIMEOUT:-600}         # seconds the Stop hook may spend on AGENT_VERIFY_CMD
 AGENT_IGNORE_CHECKS=${AGENT_IGNORE_CHECKS:-}              # comma-separated check names that never trigger a fix run
+AGENT_AUTO_RESUME=${AGENT_AUTO_RESUME:-1}                 # a trusted author's answer on an agent-blocked issue removes the label (0 = a person removes it)
 AGENT_NOTIFY=${AGENT_NOTIFY:-1}                           # 0 turns off every notification (the @mention comments and AGENT_NOTIFY_CMD)
 AGENT_NOTIFY_USER=${AGENT_NOTIFY_USER:-}                  # GitHub login mentioned in the loop's comments on blocked issues and opened PRs
 AGENT_NOTIFY_CMD=${AGENT_NOTIFY_CMD:-}                    # command run with the title and body as arguments (ntfy, Pushover, a Slack webhook, ...)
@@ -214,7 +215,7 @@ ensure_labels() {
   local have l
   have=$(gh label list --limit 200 --json name -q '.[].name')
   for l in "$L_OK:07a540:An agent may work on this" "$L_WIP:fbca04:An agent is working on this, or its PR awaits review" \
-    "$L_BLOCKED:b60205:The agent stopped and needs a human decision (answer in a comment, then remove this label to resume)" \
+    "$L_BLOCKED:b60205:The agent stopped and needs a human decision (answer in a comment; the loop removes this label, or remove it yourself)" \
     "$L_HUMAN:0e8a16:Work only a person can do (agent-ok is never added)"; do
     echo "$have" | grep -qx "${l%%:*}" && continue
     run gh label create "${l%%:*}" --color "$(echo "$l" | cut -d: -f2)" --description "${l#*:*:}" >/dev/null
@@ -323,16 +324,34 @@ pr_fix_reasons() { # pr_json since
     | .signature = "\(.head)|\(.conflict)|\(.failing | join(","))|\([.feedback[].t] | max // "")"'
 }
 
+# Has a trusted author answered an agent-blocked issue? Prints the login of the first trusted comment that is newer than the
+# loop's own "Stopped working on this" comment (and does not start with the agent marker). Prints nothing when there is no
+# such comment, or when the loop never commented (the label was added by hand: nothing to compare with).
+block_answered() { # issue
+  local r; r=$(gh_repo)
+  gh api --paginate "repos/$r/issues/$1/comments" --jq '.[] | {u: .user.login, a: .author_association, t: .created_at, b: (.body // "")}' |
+    jq -rs --arg m "$AGENT_MARKER" --arg assoc "$AGENT_TRUSTED_ASSOCIATIONS" --arg users "$AGENT_TRUSTED_USERS" "$JQ_TRUSTED"'
+      ([.[] | select(.b | startswith($m + " Stopped working on this")) | .t] | max) as $blk
+      | if $blk == null then empty
+        else ([.[] | select(.t > $blk) | select(trusted(.u; .a))
+                   | select(.b | startswith($m) | not) | select((.b | gsub("\\s"; "")) != "")] | .[0].u // empty) end'
+}
+
 # Wait for a human (agent-blocked): comment the reason on the issue and notify
 block_issue() { # issue reason
-  local cc; cc=$(mention)
+  local cc how; cc=$(mention)
+  if [ "$AGENT_AUTO_RESUME" = 1 ]; then
+    how="Write your answer or the missing information in a comment on this issue. An answer from a trusted author is enough: the loop removes \`$L_BLOCKED\` itself in its next round and resumes from where it stopped. (Removing the label by hand works too.)"
+  else
+    how="Write your answer or the missing information in a comment on this issue, then remove the \`$L_BLOCKED\` label to resume from where it stopped."
+  fi
   label_add "$1" "$L_BLOCKED"
   label_remove "$1" "$L_WIP"
   issue_comment "$1" "Stopped working on this.
 
 $2
 
-Write your answer or the missing information in a comment on this issue, then remove the \`$L_BLOCKED\` label to resume from where it stopped.${cc:+
+$how${cc:+
 
 cc $cc}"
   count_reset attempts "$1"

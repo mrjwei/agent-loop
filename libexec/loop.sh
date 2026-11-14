@@ -2,6 +2,7 @@
 # The agent loop. Looks at GitHub at a fixed interval and repeats the steps below (AI cost only accrues while an agent runs).
 #   1. Clean up: remove the worktree, branches and state of PRs that were merged or closed. An issue that is still open
 #                after its PR was merged or closed loses agent-ok, so the same work does not start again
+#      Resume:   an agent-blocked issue answered by a trusted author loses agent-blocked (AGENT_AUTO_RESUME)
 #   2. Fix:      for an agent PR with a conflict, a failing check or new review feedback, run work.sh --fix
 #   3. Triage:   when nothing is ready to start and the base branch moved since the last triage, run triage.sh
 #   4. Start:    run work.sh in parallel for issues that are agent-ok with all dependencies closed, up to the free slots
@@ -132,6 +133,21 @@ phase_cleanup() {
   [ "$DRY" = 1 ] || find "$STATE/logs" -type f -mtime +"$AGENT_LOG_DAYS" -delete 2>/dev/null || true
 }
 
+# An agent-blocked issue whose block comment was answered by a trusted author resumes: the loop removes the label (in
+# this round's snapshot too), and the issue then follows the normal path (a new attempt, or a fix run when its PR is open)
+phase_resume() {
+  local n who t
+  [ "$AGENT_AUTO_RESUME" = 1 ] || return 0
+  for n in $(jq -r --arg b "$L_BLOCKED" '.[] | select(.labels | index($b)) | .number' "$ISSUES_JSON"); do
+    who=$(block_answered "$n") || who=""
+    [ -n "$who" ] || continue
+    log "#$n: $who answered the block comment, so I removed \`$L_BLOCKED\` and the issue resumes"
+    label_remove "$n" "$L_BLOCKED"
+    t=$(mktemp "$STATE/issues.XXXXXX")
+    jq --argjson n "$n" --arg b "$L_BLOCKED" 'map(if .number == $n then .labels -= [$b] else . end)' "$ISSUES_JSON" >"$t" && mv "$t" "$ISSUES_JSON"
+  done
+}
+
 # --- 2. Fix ---
 phase_fix() {
   local p n reasons sig
@@ -196,6 +212,7 @@ do_tick() {
   issues_snapshot >"$ISSUES_JSON"
   agent_prs >"$PRS_JSON"
   phase_cleanup
+  phase_resume
   if paused; then
     log "Paused by a usage limit until $(fmt_epoch "$(paused_until)"); not starting agents (resume now: agent-loop unpause)"
     return 0
