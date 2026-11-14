@@ -43,6 +43,9 @@ AGENT_POLL_SECONDS=${AGENT_POLL_SECONDS:-300}             # how often to look at
 AGENT_MAX_ATTEMPTS=${AGENT_MAX_ATTEMPTS:-2}               # implementation attempts before agent-blocked
 AGENT_MAX_FIXES=${AGENT_MAX_FIXES:-3}                     # fix rounds per PR before agent-blocked
 AGENT_MAX_TURNS=${AGENT_MAX_TURNS:-150}
+AGENT_RUN_TIMEOUT=${AGENT_RUN_TIMEOUT:-3600}              # seconds one implement / fix run may take (0 = no limit)
+AGENT_MAX_COST_PER_RUN=${AGENT_MAX_COST_PER_RUN:-}        # API-equivalent dollars per run, via the claude CLI's own cap (empty = off)
+AGENT_DAILY_BUDGET=${AGENT_DAILY_BUDGET:-}                # API-equivalent dollars per local day; over it, no agent starts (empty = off)
 AGENT_TRIAGE_MAX_TURNS=${AGENT_TRIAGE_MAX_TURNS:-80}
 AGENT_TRIAGE_MAX_ACTIONS=${AGENT_TRIAGE_MAX_ACTIONS:-15}  # triage changes applied per run
 AGENT_VERIFY_TIMEOUT=${AGENT_VERIFY_TIMEOUT:-600}         # seconds the Stop hook may spend on AGENT_VERIFY_CMD
@@ -336,6 +339,29 @@ cc $cc}"
   count_reset fixes "$1"
   rm -f "$STATE/stamp/sig-$1"
   notify "Agent stopped (#$1)" "$2" "$(issue_url "$1")"
+}
+
+# --- Spend (from the result files in the logs; no model call) ---
+# API-equivalent dollars spent so far today (local day): the total_cost_usd of every result file written today.
+# Result files are logs/issue-<n>-<YYYYMMDD>-<HHMMSS>-<mode>.json and logs/triage-<YYYYMMDD>-<HHMMSS>.json.
+spend_today() {
+  local d f; d=$(date +%Y%m%d)
+  for f in "$STATE"/logs/*-"$d"-*.json; do
+    [ -f "$f" ] && { jq -r '.total_cost_usd // 0' "$f" 2>/dev/null || true; }
+  done | awk '{ s += $1 } END { printf "%.2f", s + 0 }'
+}
+# Is today's spend at or over AGENT_DAILY_BUDGET? (never when the budget is empty)
+over_budget() {
+  [ -n "$AGENT_DAILY_BUDGET" ] || return 1
+  awk -v a="$(spend_today)" -v b="$AGENT_DAILY_BUDGET" 'BEGIN { exit !(a + 0 >= b + 0) }'
+}
+
+# Does the installed claude CLI have a spend cap option (--max-budget-usd)? The CLI stops at the first unknown option,
+# before doing anything: if that is the deliberately bogus last one, the option before it is supported.
+claude_has_cost_cap() {
+  local probe
+  probe=$(claude -p --max-budget-usd 1 --zz-probe </dev/null 2>&1 || true)
+  case "$probe" in *"unknown option '--zz-probe'"*) return 0 ;; *) return 1 ;; esac
 }
 
 # --- Prompts ---

@@ -6,6 +6,7 @@
 #   3. Triage:   when nothing is ready to start and the base branch moved since the last triage, run triage.sh
 #   4. Start:    run work.sh in parallel for issues that are agent-ok with all dependencies closed, up to the free slots
 # Merging a PR closes the dependency of the issues waiting on it, so the next round starts them.
+# When today's spend reaches AGENT_DAILY_BUDGET, steps 2-4 are skipped until the next local day (cleanup continues).
 # When a usage limit hits, the run is not counted as a failure, and steps 2-4 stop until it resets (cleanup continues).
 #
 # Usage: agent-loop start [--once] [--dry-run] [--no-triage]
@@ -199,6 +200,14 @@ do_tick() {
     log "Paused by a usage limit until $(fmt_epoch "$(paused_until)"); not starting agents (resume now: agent-loop unpause)"
     return 0
   fi
+  if over_budget; then
+    log "Daily budget reached: \$$(spend_today) of \$${AGENT_DAILY_BUDGET} spent today (AGENT_DAILY_BUDGET); not fixing or starting agents until tomorrow"
+    if [ "$(cat "$STATE/budget-notified" 2>/dev/null)" != "$(date +%Y%m%d)" ]; then
+      [ "$DRY" = 1 ] || date +%Y%m%d >"$STATE/budget-notified"
+      notify "Agents paused" "Daily budget reached: \$$(spend_today) of \$${AGENT_DAILY_BUDGET}. No agent starts until tomorrow."
+    fi
+    return 0
+  fi
   phase_fix
   [ -z "$(candidates)" ] && phase_triage
   paused || phase_launch   # if triage hit a limit, do not start anything either
@@ -208,6 +217,8 @@ do_tick() {
 show_status() {
   local f n
   paused && echo "== Paused by a usage limit until $(fmt_epoch "$(paused_until)") (resume now: agent-loop unpause)"
+  over_budget && echo "== Daily budget reached: no agent starts until tomorrow"
+  echo "== Spend today: \$$(spend_today)$([ -n "$AGENT_DAILY_BUDGET" ] && echo " of \$${AGENT_DAILY_BUDGET} (AGENT_DAILY_BUDGET)" || echo ' (AGENT_DAILY_BUDGET is not set)')"
   echo "== Running agents"
   for f in "$STATE"/running/*.pid; do
     [ -f "$f" ] || continue
