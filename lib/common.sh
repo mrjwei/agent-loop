@@ -56,6 +56,7 @@ AGENT_AUTO_RESUME=${AGENT_AUTO_RESUME:-1}                 # a trusted author's a
 AGENT_NOTIFY=${AGENT_NOTIFY:-1}                           # 0 turns off every notification (the @mention comments and AGENT_NOTIFY_CMD)
 AGENT_NOTIFY_USER=${AGENT_NOTIFY_USER:-}                  # GitHub login mentioned in the loop's comments on blocked issues and opened PRs
 AGENT_NOTIFY_CMD=${AGENT_NOTIFY_CMD:-}                    # command run with the title and body as arguments (ntfy, Pushover, a Slack webhook, ...)
+AGENT_DIGEST_HOUR=${AGENT_DIGEST_HOUR:-}                  # local hour (0-23) at which the loop sends the daily digest through AGENT_NOTIFY_CMD (empty = off)
 AGENT_LOG_DAYS=${AGENT_LOG_DAYS:-14}                      # logs older than this are deleted
 AGENT_LIMIT_PAUSE_SECONDS=${AGENT_LIMIT_PAUSE_SECONDS:-1800} # wait this long when a usage limit hits without a reset time
 AGENT_PAUSE_AT_UTILIZATION=${AGENT_PAUSE_AT_UTILIZATION:-0.8} # stop starting agents when a usage window passes this share (keeps some for you)
@@ -404,6 +405,53 @@ block_answered() { # issue
       | if $blk == null then empty
         else ([.[] | select(.t > $blk) | select(trusted(.u; .a))
                    | select(.b | startswith($m) | not) | select((.b | gsub("\\s"; "")) != "")] | .[0].u // empty) end'
+}
+
+# --- History: one line per finished run, kept when the logs are deleted (AGENT_LOG_DAYS); read by `agent-loop stats` ---
+HISTORY_FILE="$STATE/history.jsonl"
+history_add() { # one JSON object: run, time, issue, mode, outcome, status, pr, turns, cost, model, ...
+  [ "${DRY:-0}" = 1 ] && return 0
+  printf '%s\n' "$1" >>"$HISTORY_FILE" || true
+}
+
+# Epoch seconds of a log file name's local time stamp (YYYYMMDD-HHMMSS): GNU date, then BSD date
+stamp_epoch() {
+  date -d "${1:0:4}-${1:4:2}-${1:6:2} ${1:9:2}:${1:11:2}:${1:13:2}" +%s 2>/dev/null ||
+    date -j -f '%Y%m%d-%H%M%S' "$1" +%s 2>/dev/null || echo 0
+}
+
+# Every finished run as a JSON array: history.jsonl, plus the result files in the logs that it does not have (runs from
+# before the history existed). A log file name is issue-<n>-<YYYYMMDD>-<HHMMSS>-<implement|fix>.json or triage-<date>-<time>.json.
+history_events() {
+  local tmp f run known issue mode ts epoch line
+  tmp=$(mktemp "$STATE/history.XXXXXX")
+  [ -f "$HISTORY_FILE" ] && jq -c . "$HISTORY_FILE" 2>/dev/null >>"$tmp" || true
+  known=$(jq -rs 'map(.run // empty) | .[]' "$tmp" 2>/dev/null || true)
+  for f in "$STATE"/logs/issue-*-*.json "$STATE"/logs/triage-[0-9]*.json; do
+    [ -f "$f" ] || continue
+    run=$(basename "$f" .json)
+    echo "$known" | grep -qxF -- "$run" && continue
+    case "$run" in
+      issue-*-implement | issue-*-fix) issue=${run#issue-}; issue=${issue%%-*}; mode=${run##*-}; ts=${run#issue-"$issue"-}; ts=${ts%-*} ;;
+      triage-*) issue=null; mode=triage; ts=${run#triage-} ;;
+      *) continue ;;
+    esac
+    case "$issue" in null) ;; '' | *[!0-9]*) continue ;; esac
+    epoch=$(stamp_epoch "$ts")
+    line=$(jq -c --arg run "$run" --argjson issue "$issue" --arg mode "$mode" --argjson t "$epoch" '
+        (.structured_output.status // null) as $st
+        | {run: $run, time: ($t | todate), issue: $issue, mode: $mode, status: $st, pr: (.structured_output.pr_number // null),
+           turns: (.num_turns // 0), cost: (.total_cost_usd // 0),
+           outcome: (if $mode == "triage" then (if .structured_output then "ok" else "failed" end)
+                     elif $mode == "implement" then (if $st == "pr_opened" then "pr_opened" elif $st == "blocked" then "blocked" else "failed" end)
+                     else (if $st == "fixed" then "fixed" elif $st == "blocked" then "blocked" else "failed" end) end)}' "$f" 2>/dev/null) || line=""
+    # an empty or unreadable result file (a run that was killed) still counts as a run
+    [ -n "$line" ] || line=$(jq -nc --arg run "$run" --argjson issue "$issue" --arg mode "$mode" --argjson t "$epoch" \
+      '{run: $run, time: ($t | todate), issue: $issue, mode: $mode, status: null, pr: null, turns: 0, cost: 0, outcome: "failed"}')
+    echo "$line" >>"$tmp"
+  done
+  jq -s . "$tmp"
+  rm -f "$tmp"
 }
 
 # --- Lessons: why agents stopped, and what reviewers asked for, kept for the person to turn into project rules ---

@@ -585,6 +585,82 @@ cp "$T/prs.criteria.orig" "$FIX/prs.json"; drop_work 57; rm -f "$STATE/stamp/cri
 printf 'x\n### Acceptance Criteria\n' | grep -Eiq '^[[:space:]]*(#{1,6}|[*][*])[[:space:]]*acceptance criteria' && ok "work: the check accepts any heading level and letter case" || ng "work: the check accepts any heading level and letter case"
 : >"$GH_LOG"
 
+# --- agent-loop stats, history.jsonl and the daily digest (#28) ---
+# A separate project, so that the numbers come from the fixture files only
+git init -q -b main "$T/proj2"
+S2="$T/proj2/.git/agent-loop"; mkdir -p "$S2/logs"
+d=$(date +%Y%m%d)
+res() { # name status pr turns cost -> a result file in the logs of proj2
+  jq -nc --arg s "$2" --argjson pr "${3:-null}" --argjson t "$4" --argjson c "$5" \
+    '{type:"result", num_turns:$t, total_cost_usd:$c, structured_output:({status:$s, summary:"s"} + (if $pr then {pr_number:$pr} else {} end))}' >"$S2/logs/$1.json"
+}
+res "issue-81-$d-010101-implement" pr_opened 201 10 1.5
+res "issue-82-$d-010102-implement" failed null 20 2
+res "issue-83-$d-010103-implement" pr_opened 203 30 3
+res "issue-81-$d-010104-fix" fixed null 5 0.5
+res "issue-83-$d-010105-fix" blocked null 5 0.5
+echo '{"type":"result","num_turns":2,"total_cost_usd":1,"structured_output":{"summary":"s","actions":[]}}' >"$S2/logs/triage-$d-010106.json"
+res "issue-84-20200101-010101-implement" pr_opened 9 99 99
+: >"$S2/logs/issue-85-$d-010107-implement.json"
+# a run only the history has (its log is gone), and one that both have
+{ echo '{"run":"issue-86-'"$d"'-010108-implement","time":"'"$(now_iso)"'","issue":86,"mode":"implement","outcome":"pr_opened","status":"pr_opened","pr":206,"turns":7,"cost":0.25}'
+  echo '{"run":"issue-81-'"$d"'-010101-implement","time":"'"$(now_iso)"'","issue":81,"mode":"implement","outcome":"pr_opened","status":"pr_opened","pr":201,"turns":10,"cost":1.5}'; } >"$S2/history.jsonl"
+{ echo '{"time":"'"$(now_iso)"'","issue":9,"mode":"implement","type":"blocked","reason":"needs a decision\nsecond line"}'
+  echo '{"time":"2020-01-01T00:00:00Z","issue":8,"mode":"fix","type":"blocked","reason":"ancient"}'; } >"$S2/lessons.jsonl"
+stats() { AGENT_REPO="$T/proj2" "$ROOT/bin/agent-loop" stats "$@" 2>&1; }
+j=$(stats --json)
+check "stats --json: valid JSON" true "$(echo "$j" | jq -e . >/dev/null 2>&1 && echo true || echo false)"
+check "stats: runs by mode and outcome, from the logs and the history, each run once, old ones left out" \
+  '{"fix":{"blocked":1,"fixed":1},"implement":{"failed":2,"pr_opened":3},"triage":{"ok":1}}|7+1' \
+  "$(echo "$j" | jq -c .runs)|$(echo "$j" | jq -r '"\(.runs_total - 1)+1"')"
+check "stats: PRs opened, issues blocked, fix runs per PR" '3|1|2|0.67' \
+  "$(echo "$j" | jq -r '[.prs_opened, .issues_blocked, .fix_runs, .fix_rounds_per_pr] | join("|")')"
+check "stats: turns and cost in total and per opened PR" '79|26|8.75|2.92' \
+  "$(echo "$j" | jq -r '[.turns, .turns_per_pr, .cost_usd, .cost_per_pr_usd] | join("|")')"
+out=$(stats)
+check "stats: the text output" '1|1|1|1|1' \
+  "$(echo "$out" | grep -c '^Runs: 8 (fix 2, implement 5, triage 1)')|$(echo "$out" | grep -c '^  implement: failed 2, pr_opened 3')|$(echo "$out" | grep -c '^Issues blocked: 1 (#9)')|$(echo "$out" | grep -c '^Turns: 79 in total, 26 per PR')|$(echo "$out" | grep -c 'Cost (API-equivalent): \$8.75 in total, \$2.92 per PR')"
+check "stats: --days leaves out older runs and a longer period includes them" '8|9' \
+  "$(stats --json --days 1 | jq .runs_total)|$(stats --json --days 100000 | jq .runs_total)"
+out=$(stats --digest)
+check "stats --digest: PRs opened, blocked issues with their reasons, PRs waiting, spend" '1|1|1|1' \
+  "$(echo "$out" | grep -c '^PRs opened: 3 (#201, #203, #206)')|$(echo "$out" | grep -c '^  #9: needs a decision$')|$(echo "$out" | grep -c '^  PR #20 (issue #3)')|$(echo "$out" | grep -c 'Spend (API-equivalent): \$8.75')"
+stats --days x >/dev/null; check "stats: a bad --days is refused" 1 $?
+git init -q -b main "$T/proj3"
+check "stats: with no runs it prints zeros and dashes" '0|0|1|1' \
+  "$(AGENT_REPO="$T/proj3" "$ROOT/bin/agent-loop" stats --json | jq -r '[.runs_total, .prs_opened] | join("|")')|$(AGENT_REPO="$T/proj3" "$ROOT/bin/agent-loop" stats | grep -c '^Fix runs per PR: -')|$(AGENT_REPO="$T/proj3" "$ROOT/bin/agent-loop" stats | grep -c '^Runs: 0$')"
+
+# A finished run appends one line to history.jsonl, and the file survives the log cleanup
+rm -f "$HISTORY_FILE"
+cp "$FIX/prs.json" "$T/prs.history.orig"
+result '{"status":"pr_opened","pr_number":158,"summary":"done"}' >"$T/pr58-result.jsonl"
+FAKE_CLAUDE_CMD="$(open_pr 58)" FAKE_CLAUDE_RESULT="$T/pr58-result.jsonl" AGENT_MODEL=model-h "$B" "$ROOT/libexec/work.sh" 58 >"$T/work.out" 2>&1
+check "history: a finished run appends one summary line" '1|implement|pr_opened|158|58|model-h|false' \
+  "$(wc -l <"$HISTORY_FILE" | tr -d ' ')|$(jq -r '[.mode, .outcome, .pr, .issue, .model, .timed_out] | join("|")' "$HISTORY_FILE")"
+check "history: the line names the run (the result file)" 1 "$(jq -r .run "$HISTORY_FILE" | grep -c -E '^issue-58-[0-9]{8}-[0-9]{6}-implement$')"
+cp "$T/prs.history.orig" "$FIX/prs.json"; drop_work 58; rm -f "$STATE/stamp/criteria-58"
+echo '{}' >"$STATE/logs/issue-58-20200101-010101-implement.json"; touch -t 202001010000 "$STATE/logs/issue-58-20200101-010101-implement.json"
+AGENT_LOG_DAYS=1 AGENT_MAX_PARALLEL=0 tick >/dev/null
+check "history: the log cleanup deletes old logs but not history.jsonl" 'gone|1' \
+  "$([ -e "$STATE/logs/issue-58-20200101-010101-implement.json" ] || echo gone)|$(wc -l <"$HISTORY_FILE" | tr -d ' ')"
+result '{"status":"failed","summary":"nope"}' >"$T/failed58.jsonl"
+FAKE_CLAUDE_RESULT="$T/failed58.jsonl" "$B" "$ROOT/libexec/work.sh" 59 >/dev/null 2>&1
+check "history: a failed attempt is recorded as failed" 'failed|failed' "$(tail -1 "$HISTORY_FILE" | jq -r '[.outcome, .status] | join("|")')"
+drop_work 59
+
+# The digest is sent once a day at AGENT_DIGEST_HOUR through AGENT_NOTIFY_CMD
+: >"$NOTIFY_OUT"; rm -f "$STATE/digest-sent"
+for _ in 1 2; do AGENT_DIGEST_HOUR=0 AGENT_NOTIFY=1 AGENT_NOTIFY_CMD="$T/notify.sh" AGENT_MAX_PARALLEL=0 tick >/dev/null; done
+check "loop: the digest is sent once a day" 1 "$(grep -c '^agent-loop digest|agent-loop, last 24 hours' "$NOTIFY_OUT")"
+: >"$NOTIFY_OUT"; rm -f "$STATE/digest-sent"
+AGENT_NOTIFY=1 AGENT_NOTIFY_CMD="$T/notify.sh" AGENT_MAX_PARALLEL=0 tick >/dev/null
+AGENT_DIGEST_HOUR=0 AGENT_NOTIFY=1 AGENT_NOTIFY_CMD="" AGENT_MAX_PARALLEL=0 tick >/dev/null
+AGENT_DIGEST_HOUR=23 AGENT_NOTIFY=1 AGENT_NOTIFY_CMD="$T/notify.sh" AGENT_MAX_PARALLEL=0 tick >/dev/null
+check "loop: no digest when AGENT_DIGEST_HOUR is empty, when there is no AGENT_NOTIFY_CMD, or before the hour" 0 \
+  "$(if [ "$(date +%H)" = 23 ]; then echo 0; else grep -c . "$NOTIFY_OUT"; fi)"
+rm -f "$STATE/digest-sent" "$HISTORY_FILE"
+: >"$GH_LOG"
+
 # --- CLI ---
 check "cli: version" "$(cat "$ROOT/VERSION")" "$("$ROOT/bin/agent-loop" version)"
 "$ROOT/bin/agent-loop" nope >/dev/null 2>&1; check "cli: unknown command exits 2" 2 $?

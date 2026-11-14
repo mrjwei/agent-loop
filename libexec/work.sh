@@ -166,6 +166,20 @@ if [ "$timed_out" = 0 ] && [ -z "$status" ] && resume_at=$(limit_resume_at "$str
   limited=1
   pause_until "$resume_at"
 fi
+# One line in history.jsonl per finished run (kept when the logs are deleted), written when this script exits
+outcome=failed
+record_run() {
+  local turns cost
+  turns=$(jq -r '.num_turns // 0' "$out" 2>/dev/null || true); cost=$(jq -r '.total_cost_usd // 0' "$out" 2>/dev/null || true)
+  history_add "$(jq -nc --arg run "$(basename "${out%.json}")" --arg t "$(now_iso)" --argjson n "$n" --arg mode "$mode" \
+    --arg outcome "$outcome" --arg status "$status" --arg pr "${pr_now:-$pr}" --arg model "$run_model" \
+    --arg reason "${reason:-}" --argjson timed_out "$([ "$timed_out" = 1 ] && echo true || echo false)" \
+    --argjson turns "${turns:-0}" --argjson cost "${cost:-0}" \
+    '{run: $run, time: $t, issue: $n, mode: $mode, outcome: $outcome, status: (if $status == "" then null else $status end),
+      pr: (if $pr == "" then null else ($pr | tonumber) end), turns: $turns, cost: $cost, model: $model, timed_out: $timed_out,
+      reason: (if $reason == "" then null else $reason[0:300] end)}' 2>/dev/null)" || true
+}
+trap 'rm -f "$pf"; record_run' EXIT
 # How the run ended, for the next attempt's prompt (previous_run_note)
 if [ "$timed_out" = 1 ]; then end_note="it was stopped after ${AGENT_RUN_TIMEOUT}s (AGENT_RUN_TIMEOUT)"
 elif [ "$(jq -r '.subtype // empty' "$out" 2>/dev/null)" = error_max_turns ]; then end_note="it hit the turn limit (AGENT_MAX_TURNS=$AGENT_MAX_TURNS)"
@@ -176,6 +190,7 @@ else end_note="it ended without a result"; fi
 printf '%s\n' "$end_note" >"${stream%.jsonl}.end"
 if [ "$mode" = implement ]; then
   if [ -n "$pr_now" ]; then
+    outcome=pr_opened
     count_reset attempts "$n"
     stamp_set handled "$n" "$(now_iso)"   # only comments after this count as "new feedback"
     cc=$(mention)
@@ -194,15 +209,18 @@ if [ "$mode" = implement ]; then
   fi
   if [ "$limited" = 1 ]; then
     # Not a failure: keep agent-wip and the worktree, and continue once the limit resets
+    outcome=limit
     count_dec attempts "$n"
     log "#$n: stopped by a usage limit. Will continue after $(fmt_epoch "$(paused_until)")"
     exit 75
   fi
   if [ "$status" = blocked ]; then
+    outcome=blocked
     block_issue "$n" "${reason:-No reason was given} (${resume_hint})" implement
     exit 0
   fi
   if [ "$(count_get attempts "$n")" -ge "$AGENT_MAX_ATTEMPTS" ]; then
+    outcome=blocked
     block_issue "$n" "No PR was opened after ${AGENT_MAX_ATTEMPTS} attempts. ${reason:-$summary} (${resume_hint})" implement
     exit 0
   fi
@@ -213,6 +231,7 @@ fi
 # fix (loop.sh checks the round limit before starting the next fix)
 if [ "$limited" = 1 ]; then
   # Not a failure. Neither the feedback start time nor the last state advanced, so the same reasons run again after the reset
+  outcome=limit
   count_dec fixes "$n"
   log "#$n: stopped by a usage limit. Will fix again after $(fmt_epoch "$(paused_until)")"
   exit 75
@@ -220,6 +239,7 @@ fi
 case "$status" in
   fixed | blocked)
     # Finished: advance the feedback start time and remember the current state (so the same reasons do not start another run)
+    outcome=$status
     stamp_set handled "$n" "$started"
     lesson_feedback "$n" "$(echo "$reasons" | jq -c .feedback)"   # what the reviewers asked for, for `agent-loop lessons`
     pr_json=$(agent_prs | jq -c --argjson n "$n" '.[] | select(.issue == $n)')
@@ -240,6 +260,7 @@ elif [ "$(git ls-remote origin "refs/heads/$br" | cut -f1)" = "$head_before" ] &
   [ "$(echo "$after" | jq '.conflict or (.failing | length > 0)')" = true ]; then
   # It reported "fixed" but pushed nothing, and the PR still has a conflict or a failing check. The state above is
   # remembered as handled, so no further fix run would start: hand it to a human instead of leaving the PR to wait.
+  outcome=blocked
   left=$(echo "$after" | jq -r '[(if .conflict then "merge conflicts" else empty end), (.failing[] | "failing check `\(.)`")] | join(", ")')
   run gh pr comment "$pr" --body "$AGENT_MARKER The fix run pushed nothing, and this PR still has: ${left}. Waiting for a human. ${summary}" >/dev/null
   block_issue "$n" "PR #$pr still has ${left}, and the last fix run pushed nothing (it reported: ${summary:-no summary}). If a check is flaky, re-run it; otherwise push a fix or say what to do. (${resume_hint})" fix
