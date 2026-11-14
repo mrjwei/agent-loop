@@ -19,6 +19,8 @@ Usage: agent-loop <command> [options]     (run inside the target project's git c
                           set up the current project (config, prompts, labels; --hook also adds the
                           verify Stop hook to .claude/settings.json for interactive sessions)
   doctor                  check the tools the loop needs
+  ready [--json]          check that the project is ready for the loop (verify command on a clean checkout, branch
+                          protection, labels, secrets, deny rules); exit 1 when a check fails
   start [--once] [--dry-run] [--no-triage]
                           run the loop (Ctrl-C to stop; --dry-run prints what it would do)
   status                  running agents, agent PRs, blocked issues, issues ready to start
@@ -50,6 +52,7 @@ case "$cmd" in
   labels) exec "$PKG/libexec/init.sh" --labels-only ;;
   init) exec "$PKG/libexec/init.sh" "$@" ;;
   doctor) exec "$PKG/libexec/init.sh" --check ;;
+  ready) exec "$PKG/libexec/ready.sh" "$@" ;;
   version | -V | --version) cat "$PKG/VERSION" 2>/dev/null || echo dev ;;
   help | -h | --help) usage ;;
   *) echo "agent-loop: unknown command: $cmd" >&2; usage >&2; exit 2 ;;
