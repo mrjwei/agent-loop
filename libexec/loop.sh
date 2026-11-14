@@ -149,6 +149,18 @@ phase_resume() {
   done
 }
 
+# --- Daily digest ---
+# With AGENT_DIGEST_HOUR set (and AGENT_NOTIFY_CMD to send it through), the first round at or after that local hour sends
+# `agent-loop stats --digest` once a day
+phase_digest() {
+  [ -n "$AGENT_DIGEST_HOUR" ] && [ "$AGENT_NOTIFY" = 1 ] && [ -n "$AGENT_NOTIFY_CMD" ] || return 0
+  case "$AGENT_DIGEST_HOUR" in *[!0-9]*) return 0 ;; esac
+  [ "$((10#$(date +%H)))" -ge "$((10#$AGENT_DIGEST_HOUR))" ] || return 0
+  [ "$(cat "$STATE/digest-sent" 2>/dev/null)" != "$(date +%Y%m%d)" ] || return 0
+  notify "agent-loop digest" "$("$LIBEXEC/stats.sh" --digest)"
+  [ "$DRY" = 1 ] || date +%Y%m%d >"$STATE/digest-sent"
+}
+
 # --- Base branch checks ---
 # Two PRs that each pass can break the base branch together. While a check on the head of origin/<base> has failed (other
 # than AGENT_IGNORE_CHECKS), step 4 does not start agents (cleanup and fix go on); an issue and one notification are
@@ -312,6 +324,7 @@ do_tick() {
   phase_cleanup
   phase_resume
   phase_base_check
+  phase_digest
   if paused; then
     log "Paused by a usage limit until $(fmt_epoch "$(paused_until)"); not starting agents (resume now: agent-loop unpause)"
     return 0

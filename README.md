@@ -61,6 +61,7 @@ agent-loop kill                                        # stop running agents and
 agent-loop unpause                                     # clear a usage-limit pause
 agent-loop work <issue> [--fix]                        # run a single issue by hand
 agent-loop triage [--dry-run]                          # sync issues with plan files
+agent-loop stats [--days N] [--json|--digest]          # outcomes, turns and cost of the finished runs (default 7 days); --digest: a short text for the last 24 hours
 agent-loop lessons [--days N]                          # why agents stopped and what reviewers asked for (default 30 days), newest first
 agent-loop labels                                      # (re)create the labels
 agent-loop doctor                                      # check tools, claude CLI options, gh auth, base branch
@@ -87,6 +88,12 @@ Every attempt after the first starts with what the previous run left behind: its
 Passing checks prove the project's checks pass, not that the issue is done. So the implement prompt requires a `## Acceptance criteria` section in the PR body: one line per criterion of the issue, each with its evidence (the test that covers it, or the file and lines) or `not done` with the reason, and a PR with a `not done` line uses `Refs #<n>` instead of `Closes #<n>`. The fix prompt keeps the section up to date. After an implement run opens a PR, `work.sh` checks that the body has the section and, if not, comments once on the PR; it starts no extra run for it. There is no second review pass, so this costs no extra tokens (screenshots or browser evidence for UI work are out of scope).
 
 Outcomes are judged by GitHub's real state (is a PR open?), not by what the agent claims. Implementation stops after 2 attempts and fixing after 3 rounds, each ending in `agent-blocked` plus a notification. Agents run in their own process group, so Ctrl-C on the loop leaves them running and `agent-loop kill` stops them completely.
+
+### Stats and the daily digest
+
+Without numbers, the effect of a prompt, model or configuration change is a guess. `agent-loop stats [--days N]` (default 7) prints, for the finished runs in that period: runs by mode and outcome, PRs opened, issues blocked, fix runs per opened PR, and turns and API-equivalent cost in total and per opened PR. `--json` prints the same numbers as JSON for other tools. `--digest` prints a short text for the last 24 hours: PRs opened, issues blocked with their reasons, PRs waiting for review, and spend. With `AGENT_DIGEST_HOUR` (a local hour, empty = off) and `AGENT_NOTIFY_CMD` set, the first round at or after that hour sends the digest once a day through the command.
+
+Each finished run appends one line to `.git/agent-loop/history.jsonl` (run, time, issue, mode, outcome, status, PR, turns, cost, model), which is kept when the logs are deleted after `AGENT_LOG_DAYS`; `stats` also reads result files in the logs that the history does not have (runs from before it existed). Outcomes are `pr_opened`, `fixed`, `blocked`, `failed` (the attempt or round will be tried again) and `limit` (stopped by a usage limit); triage runs appear as mode `triage` with outcome `ok`, `failed` or `limit`. "Fix runs per PR" is the number of fix runs divided by the PRs opened in the same period. Everything is computed by the scripts with `jq`; no model call.
 
 ### Lessons
 
@@ -168,7 +175,8 @@ The value is comma-separated globs (`*`, `?`, `[...]`; a `*` also matches `/`, s
 | `AGENT_NOTIFY` | `1` | `0` turns off every notification: the `@mention` comments and `AGENT_NOTIFY_CMD` |
 | `AGENT_NOTIFY_USER` | empty (`init` fills in your GitHub login) | GitHub login mentioned in the loop's comments on blocked issues and opened PRs |
 | `AGENT_NOTIFY_CMD` | empty | Command run with the title and body as arguments and the issue or PR URL in `$AGENT_NOTIFY_URL` |
-| `AGENT_LOG_DAYS` | `14` | Log retention |
+| `AGENT_LOG_DAYS` | `14` | Log retention (`history.jsonl` and `lessons.jsonl` are kept) |
+| `AGENT_DIGEST_HOUR` | empty (off) | Local hour (0-23) at which the loop sends `agent-loop stats --digest` once a day through `AGENT_NOTIFY_CMD` |
 | `AGENT_EXTRA_ALLOW`, `AGENT_EXTRA_DENY`, `AGENT_EXTRA_TRIAGE_DENY` | empty arrays | Extra permission rules (Claude Code `--allowedTools` / `--disallowedTools` syntax) |
 | `AGENT_SCRUB_ENV` | common cloud and token variables | Variables removed from the environment of the agents and of `AGENT_SETUP_CMD`. If the install needs one (e.g. `NPM_TOKEN` for a private registry), set this list without it |
 | `AGENT_CHILD_ENV` | `(AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null)` | `NAME=VALUE` pairs set for the agents |
@@ -208,7 +216,9 @@ Everything is under `.git/agent-loop/` (outside version control, shared by all w
 | `logs/issue-<n>-<time>-<…>.end` | One line on how the run ended, read by the next attempt's prompt |
 | `logs/issue-<n>-<time>-<…>.log` | `work.sh` output |
 | `logs/triage-<time>.json(l)`, `.applied.log`, `.issue-<n>.old-body.md` | Triage proposal, changes applied, previous issue bodies |
+| `digest-sent` | The day the digest was last sent |
 | `base-failed-sha`, `base-last-green-sha` | The base commit an issue was opened for, and the last base commit seen passing |
+| `history.jsonl` | One line per finished run (outcome, turns, cost, ...). Kept; read by `agent-loop stats` |
 | `lessons.jsonl` | One line per agent stop (time, issue, mode, reason) and per review comment a fix run was started for (author, first line). Kept; read by `agent-loop lessons`. No model reads or summarizes it |
 | `paused-until` | End of a usage-limit pause (epoch seconds) |
 | `running/<n>.pid`, `count/`, `stamp/` | Running agents, retry counters, feedback timestamps |
