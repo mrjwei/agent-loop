@@ -32,6 +32,8 @@ q=. prev=
 for a in "$@"; do case "$prev" in -q | --jq) q=$a ;; esac; prev=$a; done
 case "$*" in
   "repo view"*) echo "o/r" ;;
+  "api --paginate repos/o/r/pulls/"*"/files"*) # the changed files of PR n, in the REST format, from $FIX/pr-api-files-<n>.json
+    n=${3#repos/o/r/pulls/}; n=${n%%/*}; if [ -f "$FIX/pr-api-files-$n.json" ]; then jq -c "$q" "$FIX/pr-api-files-$n.json"; fi ;;
   "pr list --head "*) # --head <branch> --state <state>
     jq --arg b "$4" --arg s "$6" '[.[] | select(.headRefName == $b and ($s == "all" or (.state | ascii_downcase) == $s))]' "$FIX/prs.json" | jq -r "$q" ;;
   "pr view "*" --json body"*) f="$FIX/pr-body-$3.txt"; if [ -f "$f" ]; then cat "$f"; fi ;;
@@ -44,7 +46,8 @@ case "$*" in
   "pr list --state open"*) jq '[.[] | select(.state == "OPEN")]' "$FIX/prs.json" | jq -r "$q" ;;
   "issue list --state closed"*) echo '[]' ;;
   "issue list --label"*) echo '[]' | jq -r "$q" ;;
-  "label list"*) echo '[{"name":"agent-ok"},{"name":"agent-wip"},{"name":"agent-blocked"},{"name":"human"},{"name":"bug"},{"name":"agent-automerge"}]' | jq -r "$q" ;;
+  "label list"*) if [ -n "${FAKE_LABELS_NO_RISK:-}" ]; then risk=''; else risk=',{"name":"risk:high"}'; fi
+                 echo '[{"name":"agent-ok"},{"name":"agent-wip"},{"name":"agent-blocked"},{"name":"human"},{"name":"bug"},{"name":"agent-automerge"}'"$risk]" | jq -r "$q" ;;
   "issue edit"* | "issue comment"* | "pr comment"* | "label create"*) echo "$*" >>"$GH_LOG" ;;
   "issue create"*) echo "$*" >>"$GH_LOG"; echo "https://github.com/o/r/issues/101" ;;
   "api graphql"*"after=CURSOR1"*) cat "$FIX/page2.json" ;;
@@ -94,6 +97,7 @@ cat >"$T/bin/claude" <<'EOF'
 # given in $FAKE_CLAUDE_PROMPT when set.
 # Like the real CLI, it stops at the first unknown option (--max-budget-usd is unknown with FAKE_CLAUDE_NO_COST_CAP=1).
 case " $* " in
+  " --version ") echo "9.9.9 (fake)"; exit 0 ;;
   *" --zz-probe "*)
     if [ -n "${FAKE_CLAUDE_NO_COST_CAP:-}" ] && [[ " $* " == *" --max-budget-usd "* ]]; then echo "error: unknown option '--max-budget-usd'"
     else echo "error: unknown option '--zz-probe'"; fi
@@ -679,7 +683,10 @@ rm -f "$STATE/digest-sent" "$HISTORY_FILE"
 check "automerge: the agents' deny rule for gh pr merge is unchanged" 'yes yes' "$(denied 'Bash(*gh *pr merge*)') $(denied 'Bash(*gh *pr close*)')"
 cp "$FIX/page1.json" "$T/page1.am.orig"; cp "$FIX/page2.json" "$T/page2.am.orig"; cp "$FIX/prs.json" "$T/prs.am.orig"
 echo 'Closes #90' >"$FIX/pr-body-190.txt"
+GOODF='[{"filename":"src/a.sh","status":"modified","additions":10,"deletions":2},{"filename":"test/run.sh","status":"modified","additions":5,"deletions":0}]'
+files190() { printf '%s\n' "$1" >"$FIX/pr-api-files-190.json"; rm -rf "$STATE/pr-files"; }   # the changed files of PR 190 (REST format)
 am_fixture() { # issue-90-labels-json pr-mergeable pr-checks-json
+  files190 "$GOODF"
   { echo '{"data":{"repository":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":['
     node 1 other '[]'; echo ,
     node 90 feature "$1" '{"body":"x"}'
@@ -733,8 +740,92 @@ FAKE_MERGE_FAIL=1 AGENT_MAX_PARALLEL=0 tick >"$T/am.out" 2>&1
 check "automerge: a failed merge is logged and announces nothing" '1|0' "$(grep -c 'could not merge PR #190 automatically' "$T/am.out")|$(grep -c '^pr comment 190' "$GH_LOG")"
 am_fixture "$LAB" CONFLICTING "$GOODC"; rm -f "$STATE/stamp/automerge-why-90"
 : >"$T/am2.out"; for _ in 1 2; do AGENT_MAX_PARALLEL=0 tick >>"$T/am2.out" 2>&1; done
-check "automerge: why a labeled PR is not merged is logged once per reason" 1 "$(grep -c '#90: PR #190 is not merged automatically: the PR is not mergeable (CONFLICTING)' "$T/am2.out")"
+check "automerge: why a labeled PR is not merged is logged once per reason" 1 "$(grep -c '#90: PR #190 is not merged automatically (policy label): the PR is not mergeable (CONFLICTING)' "$T/am2.out")"
 rm -f "$STATE/stamp/automerge-why-90"
+
+# --- Auto-merge policies: label, shadow, risk, and the low-risk conditions (#44) ---
+echo 'Closes #90' >"$FIX/pr-body-190.txt"
+amr() { AGENT_AUTOMERGE_POLICY=risk tick --dry-run | grep -c 'dry-run. gh pr merge 190'; }
+UNL='["agent-wip"]'   # the issue has no agent-automerge label
+am_fixture "$UNL" MERGEABLE "$GOODC"
+check "risk: a low-risk PR whose issue has no label is merged" 1 "$(amr)"
+check "risk: the same PR is not merged under the label policy, nor when AGENT_AUTOMERGE=0" '0|0' "$(am)|$(AGENT_AUTOMERGE=0 amr)"
+check "risk: an unknown policy is treated as label (with a warning)" '0|1' \
+  "$(AGENT_AUTOMERGE_POLICY=nonsense tick --dry-run | grep -c 'gh pr merge')|$(AGENT_AUTOMERGE_POLICY=nonsense tick --dry-run | grep -c "must be label, shadow or risk")"
+# one test per condition of "low-risk": breaking it makes the PR high-risk, and nothing is merged
+check "low-risk: a changed file on a high-risk path (the CI configuration)" 0 \
+  "$(files190 '[{"filename":".github/workflows/ci.yml","status":"modified","additions":1,"deletions":1}]'; amr)"
+check "low-risk: a lockfile or manifest, in the root or in a subdirectory" '0|0' \
+  "$(files190 '[{"filename":"pnpm-lock.yaml","status":"modified","additions":1,"deletions":1}]'; amr)|$(files190 '[{"filename":"web/package.json","status":"modified","additions":1,"deletions":1}]'; amr)"
+check "low-risk: a file on a path the project added to AGENT_RISK_PATHS" '0|1' \
+  "$(files190 '[{"filename":"migrations/001.sql","status":"added","additions":3,"deletions":0}]'; AGENT_RISK_PATHS='migrations/**' amr)|$(AGENT_RISK_PATHS='' amr)"
+check "low-risk: a renamed file whose old path was a high-risk path" 0 \
+  "$(files190 '[{"filename":"docs/x.md","previous_filename":"CLAUDE.md","status":"renamed","additions":0,"deletions":0}]'; amr)"
+check "low-risk: more than AGENT_AUTOMERGE_MAX_LINES lines (additions plus deletions), but exactly the limit is fine" '0|1' \
+  "$(files190 '[{"filename":"src/a.sh","status":"modified","additions":200,"deletions":101}]'; amr)|$(files190 '[{"filename":"src/a.sh","status":"modified","additions":200,"deletions":100}]'; amr)"
+check "low-risk: AGENT_AUTOMERGE_MAX_LINES is configurable" '1|0' \
+  "$(files190 "$GOODF"; AGENT_AUTOMERGE_MAX_LINES=17 amr)|$(AGENT_AUTOMERGE_MAX_LINES=16 amr)"
+check "low-risk: a deleted test file" 0 \
+  "$(files190 '[{"filename":"src/a.sh","status":"modified","additions":50,"deletions":0},{"filename":"test/old.sh","status":"removed","additions":0,"deletions":3}]'; amr)"
+check "low-risk: a test file renamed to a path that is not a test" 0 \
+  "$(files190 '[{"filename":"src/old.sh","previous_filename":"test/old.sh","status":"renamed","additions":0,"deletions":0}]'; amr)"
+check "low-risk: more lines removed from test files than added, but equal is fine" '0|1' \
+  "$(files190 '[{"filename":"src/a.sh","status":"modified","additions":50,"deletions":0},{"filename":"src/a.test.ts","status":"modified","additions":2,"deletions":9}]'; amr)|$(files190 '[{"filename":"src/a.sh","status":"modified","additions":5,"deletions":0},{"filename":"src/a.test.ts","status":"modified","additions":9,"deletions":9}]'; amr)"
+files190 "$GOODF"
+check "low-risk: its issue labeled risk:high" 0 "$(am_fixture '["agent-wip","risk:high"]' MERGEABLE "$GOODC"; amr)"
+check "low-risk: a condition of automerge_blocker (a conflict, a failing check, no Closes line)" '0|0|0' \
+  "$(am_fixture "$UNL" CONFLICTING "$GOODC"; amr)|$(am_fixture "$UNL" MERGEABLE '[{"name":"test","status":"COMPLETED","conclusion":"FAILURE"}]'; amr)|$(am_fixture "$UNL" MERGEABLE "$GOODC"; echo 'Refs #90' >"$FIX/pr-body-190.txt"; amr)"
+echo 'Closes #90' >"$FIX/pr-body-190.txt"
+check "low-risk: files that cannot be read count as high-risk" 0 "$(am_fixture "$UNL" MERGEABLE "$GOODC"; rm -f "$FIX/pr-api-files-190.json"; amr)"
+# the label keeps working in every policy, but a high-risk path or risk:high stops it
+check "label: a labeled PR is merged under every policy (size and tests do not stop a person's decision)" '1|1|1' \
+  "$(am_fixture "$LAB" MERGEABLE "$GOODC"; files190 '[{"filename":"src/a.sh","status":"modified","additions":900,"deletions":0}]'; am)|$(AGENT_AUTOMERGE_POLICY=shadow tick --dry-run | grep -c 'dry-run. gh pr merge 190')|$(amr)"
+check "label: a labeled PR that changes a high-risk path is not merged, in any policy" '0|0|0' \
+  "$(files190 '[{"filename":".github/workflows/ci.yml","status":"modified","additions":1,"deletions":1}]'; am)|$(AGENT_AUTOMERGE_POLICY=shadow tick --dry-run | grep -c 'dry-run. gh pr merge 190')|$(amr)"
+check "label: risk:high on a labeled issue stops it, and so do unreadable files" '0|0' \
+  "$(am_fixture '["agent-automerge","risk:high"]' MERGEABLE "$GOODC"; am)|$(am_fixture "$LAB" MERGEABLE "$GOODC"; rm -f "$FIX/pr-api-files-190.json"; am)"
+out=$(files190 '[{"filename":"CLAUDE.md","status":"modified","additions":1,"deletions":1}]'; am_fixture "$LAB" MERGEABLE "$GOODC"; files190 '[{"filename":"CLAUDE.md","status":"modified","additions":1,"deletions":1}]'; tick --dry-run)
+check "label: the log says why, with the policy" 1 "$(echo "$out" | grep -c '#90: PR #190 is not merged automatically (policy label): changes a high-risk path (CLAUDE.md (matches CLAUDE.md))')"
+check "label: a labeled PR's diff is read, an unlabeled PR's is not (policy label)" '0' "$(am_fixture "$UNL" MERGEABLE "$GOODC"; rm -f "$FIX/pr-api-files-190.json"; tick --dry-run | grep -c 'changed files could not be read')"
+# the merge comment and the log name the policy and the reasons
+am_fixture "$UNL" MERGEABLE "$GOODC"
+: >"$GH_LOG"
+AGENT_AUTOMERGE_POLICY=risk AGENT_MAX_PARALLEL=0 tick >"$T/am.out" 2>&1
+check "risk: the merge comment names the policy and the reasons; the log line too" '1|1|1' \
+  "$(grep -c '^pr merge 190 --squash --match-head-commit abc123' "$GH_LOG")|$(grep -c '^pr comment 190 .*Merged automatically (squash). Policy .risk.: the PR is low-risk (17 changed lines, no high-risk path, no test removed)' "$GH_LOG")|$(grep -c 'merged PR #190 automatically (squash, policy risk: the PR is low-risk (17 changed lines' "$T/am.out")"
+# status shows each agent PR as low or high risk, and why
+out=$("$B" "$ROOT/libexec/loop.sh" --status 2>&1)
+check "status: an agent PR is shown as low-risk" 1 "$(echo "$out" | grep -c 'PR #190 <- #90 .*risk=low (17 changed lines)')"
+files190 '[{"filename":".github/workflows/ci.yml","status":"modified","additions":1,"deletions":1},{"filename":"src/a.sh","status":"modified","additions":400,"deletions":0}]'
+out=$(AGENT_AUTOMERGE_POLICY=shadow "$B" "$ROOT/libexec/loop.sh" --status 2>&1)
+check "status: or as high-risk, with the reasons, and shows the policy" '1|1' \
+  "$(echo "$out" | grep -c 'PR #190 <- #90 .*risk=high: changes a high-risk path (.github/workflows/ci.yml (matches .github/\*\*)); 402 lines changed (AGENT_AUTOMERGE_MAX_LINES=300)')|$(echo "$out" | grep -c '== Agent PRs (auto-merge policy: shadow)')"
+# shadow: nothing merges that label would not merge, and one comment per head commit on each agent PR
+shadow() { AGENT_AUTOMERGE_POLICY=shadow AGENT_MAX_PARALLEL=0 tick >"$T/shadow.out" 2>&1; }
+shadow_comments() { grep -c '^pr comment 190 .*Auto-merge policy .shadow.' "$GH_LOG"; }
+am_fixture "$UNL" MERGEABLE "$GOODC"; rm -f "$STATE/stamp/shadow-90"; : >"$GH_LOG"
+shadow; shadow
+check "shadow: a low-risk PR with no label is not merged, and gets one comment that says it would be" '0|1|1' \
+  "$(grep -c '^pr merge' "$GH_LOG")|$(shadow_comments)|$(grep -c '^pr comment 190 .*commit abc123[^:]*: would merge automatically (low-risk: 17 changed lines' "$GH_LOG")"
+jq 'map(if .number == 190 then .headRefOid = "def4567" else . end)' "$FIX/prs.json" >"$T/prs.new" && cp "$T/prs.new" "$FIX/prs.json"
+shadow; shadow
+check "shadow: a new head commit gets its own comment (and only one)" '2|1' \
+  "$(shadow_comments)|$(grep -c '^pr comment 190 .*commit def4567' "$GH_LOG")"
+am_fixture "$UNL" MERGEABLE "$GOODC"; files190 '[{"filename":"CLAUDE.md","status":"modified","additions":1,"deletions":1}]'; rm -f "$STATE/stamp/shadow-90"; : >"$GH_LOG"
+shadow
+check "shadow: a PR that needs a person says why" 1 "$(grep -c '^pr comment 190 .*Auto-merge policy .shadow.*: needs a person: changes a high-risk path (CLAUDE.md (matches CLAUDE.md)).' "$GH_LOG")"
+am_fixture "$UNL" MERGEABLE '[{"name":"test","status":"IN_PROGRESS","conclusion":null}]'; rm -f "$STATE/stamp/shadow-90"; : >"$GH_LOG"
+shadow
+check "shadow: no comment while checks are still running (the verdict is not settled)" 0 "$(shadow_comments)"
+am_fixture "$UNL" MERGEABLE "$GOODC"; echo 'Refs #90' >"$FIX/pr-body-190.txt"; rm -f "$STATE/stamp/shadow-90"; : >"$GH_LOG"
+shadow
+check "shadow: a condition of automerge_blocker shows up as a reason" 1 "$(grep -c 'needs a person: the PR body does not contain' "$GH_LOG")"
+echo 'Closes #90' >"$FIX/pr-body-190.txt"
+am_fixture "$LAB" MERGEABLE "$GOODC"; rm -f "$STATE/stamp/shadow-90"; : >"$GH_LOG"
+shadow
+check "shadow: a labeled PR is merged exactly as in the label policy" 1 "$(grep -c '^pr merge 190 --squash' "$GH_LOG")"
+rm -f "$STATE/stamp/shadow-90" "$STATE/stamp/automerge-why-90"
+rm -rf "$STATE/pr-files"; rm -f "$FIX/pr-api-files-190.json"
 cp "$T/page1.am.orig" "$FIX/page1.json"; cp "$T/page2.am.orig" "$FIX/page2.json"; cp "$T/prs.am.orig" "$FIX/prs.json"; rm -f "$FIX/pr-body-190.txt"
 # triage never adds the label (a person decides), even for a trusted author's issue
 result '{"summary":"s","actions":[{"op":"update","number":6,"add_labels":["agent-ok","agent-automerge"],"remove_labels":["agent-automerge"],"reason":"r"}]}' >"$T/triage-am.jsonl"
@@ -794,7 +885,7 @@ check "review: feedback before the sticky comment's last edit is old" 0 "$(FAKE_
 am_fixture "$LAB" MERGEABLE "$GOODC"; echo 'Closes #90' >"$FIX/pr-body-190.txt"
 check "review: AGENT_AUTOMERGE_REQUIRE_REVIEW with the template's comments" '1|0' \
   "$(AGENT_AUTOMERGE_REQUIRE_REVIEW='claude[bot]' FAKE_BOT_BODY=$CLEAN_BODY am)|$(AGENT_AUTOMERGE_REQUIRE_REVIEW='claude[bot]' FAKE_BOT_BODY=$BLOCK_BODY am)"
-cp "$T/page1.am.orig" "$FIX/page1.json"; cp "$T/page2.am.orig" "$FIX/page2.json"; cp "$T/prs.am.orig" "$FIX/prs.json"; rm -f "$FIX/pr-body-190.txt"
+cp "$T/page1.am.orig" "$FIX/page1.json"; cp "$T/page2.am.orig" "$FIX/page2.json"; cp "$T/prs.am.orig" "$FIX/prs.json"; rm -f "$FIX/pr-body-190.txt" "$FIX/pr-api-files-190.json"; rm -rf "$STATE/pr-files"
 # agent-loop init writes the template, and --force replaces a workflow that is there
 WF=.github/workflows/claude-code-review.yml
 git init -q -b main "$T/proj4"
@@ -805,6 +896,13 @@ AGENT_REPO="$T/proj4" "$ROOT/bin/agent-loop" init --no-labels >/dev/null 2>&1
 check "init: leaves an existing workflow that does not use claude-code-action alone" '# my own review workflow' "$(cat "$T/proj4/$WF")"
 AGENT_REPO="$T/proj4" "$ROOT/bin/agent-loop" init --no-labels --force >/dev/null 2>&1
 check "init --force: replaces it with the template" same "$(cmp -s "$TPL" "$T/proj4/$WF" && echo same || echo different)"
+# --- The risk:high label (#44) ---
+: >"$GH_LOG"
+FAKE_LABELS_NO_RISK=1 ensure_labels
+check "labels: risk:high is created with the others" '1|1' \
+  "$(grep -c '^label create risk:high --color d93f0b --description The PR of this issue is never merged automatically$' "$GH_LOG")|$(wc -l <"$GH_LOG" | tr -d ' ')"
+: >"$GH_LOG"
+
 
 # --- CLI ---
 check "cli: version" "$(cat "$ROOT/VERSION")" "$("$ROOT/bin/agent-loop" version)"
