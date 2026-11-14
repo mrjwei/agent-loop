@@ -19,11 +19,11 @@ Usage: agent-loop <command> [options]     (run inside the target project's git c
                           set up the current project (config, prompts, labels, the review workflow; --hook also adds
                           the verify Stop hook to .claude/settings.json for interactive sessions; --plan writes
                           docs/plans/TEMPLATE.md; --no-workflow skips the review workflow)
-  doctor                  check the tools the loop needs
+  doctor                  check the tools the loop needs, and the GitHub account it acts as
   plan-lint [files...]    check plan files (default: AGENT_PLANS_GLOB) for items triage can use; exit 1 on errors
   start [--once] [--dry-run] [--no-triage]
                           run the loop (Ctrl-C to stop; --dry-run prints what it would do)
-  status                  running agents, agent PRs (with their risk), blocked issues, issues ready to start
+  status                  the account it acts as, running agents, agent PRs (with their risk), blocked and ready issues
   kill                    stop running agents (worktrees stay; the next run continues from them)
   unpause                 clear a usage-limit pause
   work <issue> [--fix]    run one issue by hand (implement, or fix its PR)

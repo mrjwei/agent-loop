@@ -386,6 +386,15 @@ diff_risk() {
 # Join lines with "; " (for log lines and comments)
 join_lines() { awk 'NF { if (n++) printf "; "; printf "%s", $0 } END { print "" }'; }
 
+# The GitHub user the loop acts as (the account of `gh`, or of GH_TOKEN)
+gh_user() { gh api user -q .login 2>/dev/null || true; }
+# Are two GitHub logins the same user? (case-insensitive, a leading @ ignored; never true when one is empty)
+same_login() {
+  local a b
+  a=$(printf '%s' "${1#@}" | tr '[:upper:]' '[:lower:]'); b=$(printf '%s' "${2#@}" | tr '[:upper:]' '[:lower:]')
+  [ -n "$a" ] && [ "$a" = "$b" ]
+}
+
 has_label() { # snapshot.json issue label
   jq -e --argjson n "$2" --arg l "$3" '.[] | select(.number == $n) | .labels | index($l)' "$1" >/dev/null
 }
