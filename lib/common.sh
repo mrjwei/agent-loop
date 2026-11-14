@@ -373,8 +373,24 @@ block_answered() { # issue
                    | select(.b | startswith($m) | not) | select((.b | gsub("\\s"; "")) != "")] | .[0].u // empty) end'
 }
 
+# --- Lessons: why agents stopped, and what reviewers asked for, kept for the person to turn into project rules ---
+# One JSON object per line in lessons.jsonl; `agent-loop lessons` prints them. No model reads this file.
+LESSONS_FILE="$STATE/lessons.jsonl"
+lesson_blocked() { # issue mode reason
+  [ "${DRY:-0}" = 1 ] && return 0
+  jq -nc --arg t "$(now_iso)" --argjson n "$1" --arg m "$2" --arg r "$3" \
+    '{time: $t, issue: $n, mode: $m, type: "blocked", reason: $r}' >>"$LESSONS_FILE" || true
+}
+lesson_feedback() { # issue feedback-json-array (the "feedback" of pr_fix_reasons: u, t, where, b)
+  [ "${DRY:-0}" = 1 ] && return 0
+  echo "$2" | jq -c --arg t "$(now_iso)" --argjson n "$1" \
+    '.[] | {time: $t, issue: $n, mode: "fix", type: "feedback", author: .u, where: .where,
+            feedback: ((.b | split("\n") | map(select(test("\\S"))) | .[0] // "") | .[0:300])}' >>"$LESSONS_FILE" || true
+}
+
 # Wait for a human (agent-blocked): comment the reason on the issue and notify
-block_issue() { # issue reason
+block_issue() { # issue reason [implement|fix]
+  lesson_blocked "$1" "${3:-}" "$2"
   local cc how; cc=$(mention)
   if [ "$AGENT_AUTO_RESUME" = 1 ]; then
     how="Write your answer or the missing information in a comment on this issue. An answer from a trusted author is enough: the loop removes \`$L_BLOCKED\` itself in its next round and resumes from where it stopped. (Removing the label by hand works too.)"
