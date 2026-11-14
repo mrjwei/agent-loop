@@ -61,6 +61,14 @@ render_prompt triage | (cd "$wt" && without_credentials claude -p --strict-mcp-c
   --output-format stream-json --verbose --json-schema "$schema" --name "agent triage") >"$stream" 2>"$out.stderr" || true
 result_of "$stream" >"$out" || true
 pause_if_heavy_usage "$stream"
+# One line in history.jsonl (kept when the logs are deleted)
+if jq -e .structured_output "$out" >/dev/null 2>&1; then tri_outcome=ok
+elif limit_resume_at "$stream" >/dev/null; then tri_outcome=limit
+else tri_outcome=failed; fi
+tri_turns=$(jq -r '.num_turns // 0' "$out" 2>/dev/null || true); tri_cost=$(jq -r '.total_cost_usd // 0' "$out" 2>/dev/null || true)
+history_add "$(jq -nc --arg run "$(basename "${out%.json}")" --arg t "$(now_iso)" --arg outcome "$tri_outcome" --arg model "$AGENT_TRIAGE_MODEL" \
+  --argjson turns "${tri_turns:-0}" --argjson cost "${tri_cost:-0}" \
+  '{run: $run, time: $t, issue: null, mode: "triage", outcome: $outcome, status: null, pr: null, turns: $turns, cost: $cost, model: $model}' 2>/dev/null)" || true
 if ! jq -e .structured_output "$out" >/dev/null 2>&1 && resume_at=$(limit_resume_at "$stream"); then
   pause_until "$resume_at"
   exit 75   # usage limit: loop.sh runs triage again after it resets
