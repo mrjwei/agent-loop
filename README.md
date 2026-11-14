@@ -15,7 +15,7 @@ It is a set of bash scripts (macOS bash 3.2 compatible) around `claude -p`, `gh`
 
 - `git` ≥ 2.31, `jq`, [`gh`](https://cli.github.com) (authenticated: `gh auth login`), and the [`claude`](https://claude.com/claude-code) CLI
 - A GitHub repository with an `origin` remote. Protect the base branch so nothing can be pushed to it without a PR; the safety model relies on this.
-- macOS or Linux. Notifications (`osascript`) and keep-awake (`caffeinate`) are macOS-only and skipped elsewhere.
+- macOS or Linux. Keep-awake (`caffeinate`) is macOS-only and skipped elsewhere.
 
 ## Install
 
@@ -81,6 +81,19 @@ Agents run as `claude -p`, so they bill like any headless Claude Code use: again
 
 Outcomes are judged by GitHub's real state (is a PR open?), not by what the agent claims. Implementation stops after 2 attempts and fixing after 3 rounds, each ending in `agent-blocked` plus a notification. Agents run in their own process group, so Ctrl-C on the loop leaves them running and `agent-loop kill` stops them completely.
 
+### Notifications
+
+Three events need a person: an agent stopped (`agent-blocked`), a PR was opened, and agents are paused by a usage limit. The scripts send the notifications themselves; no model call is involved, and `AGENT_NOTIFY=0` turns them all off. A failing notification is logged and never fails the loop.
+
+- **GitHub (default).** The loop's comment on a blocked issue and its comment on a newly opened PR mention `AGENT_NOTIFY_USER`, so GitHub delivers a mobile push and an email with a link to the thread. Set it to your login (`init` fills in the authenticated user). GitHub does not notify you about your own comments, so this channel works when the loop's `gh` account is not `AGENT_NOTIFY_USER` (for example a bot account); if the loop runs as you, add `AGENT_NOTIFY_CMD`.
+- **`AGENT_NOTIFY_CMD` (optional).** Run for all three events with the title and body appended as arguments (`$1`, `$2`), the issue or PR URL in `$AGENT_NOTIFY_URL`, and the title and body also in `$AGENT_NOTIFY_TITLE` and `$AGENT_NOTIFY_BODY`. The usage-limit pause has no issue to comment on, so it uses this channel only (it is also shown at the top of `agent-loop status`). A working example with [ntfy](https://ntfy.sh), which pushes to the ntfy phone app:
+
+  ```bash
+  AGENT_NOTIFY_CMD='ntfy_send() { curl -fsS -H "Title: $1" -H "Click: $AGENT_NOTIFY_URL" -d "$2" https://ntfy.sh/CHOOSE-A-SECRET-TOPIC >/dev/null; }; ntfy_send'
+  ```
+
+  Pushover, a Slack webhook and the like work the same way: any command that reads `$1`, `$2` and `$AGENT_NOTIFY_URL`.
+
 ### Labels
 
 | Label | Meaning | Set by |
@@ -126,7 +139,9 @@ Outcomes are judged by GitHub's real state (is a PR open?), not by what the agen
 | `AGENT_CLEAN_REVIEW_USER` | `claude[bot]` | A "No issues found" comment from this user is not feedback |
 | `AGENT_TRUSTED_ASSOCIATIONS` | `OWNER MEMBER COLLABORATOR` | GitHub author associations whose comments count as feedback and whose issues triage may give `agent-ok` (`*` = everyone) |
 | `AGENT_TRUSTED_USERS` | the value of `AGENT_CLEAN_REVIEW_USER` | Logins trusted whatever their association (review bots) |
-| `AGENT_NOTIFY` | `1` | macOS notifications |
+| `AGENT_NOTIFY` | `1` | `0` turns off every notification: the `@mention` comments and `AGENT_NOTIFY_CMD` |
+| `AGENT_NOTIFY_USER` | empty (`init` fills in your GitHub login) | GitHub login mentioned in the loop's comments on blocked issues and opened PRs |
+| `AGENT_NOTIFY_CMD` | empty | Command run with the title and body as arguments and the issue or PR URL in `$AGENT_NOTIFY_URL` |
 | `AGENT_LOG_DAYS` | `14` | Log retention |
 | `AGENT_EXTRA_ALLOW`, `AGENT_EXTRA_DENY`, `AGENT_EXTRA_TRIAGE_DENY` | empty arrays | Extra permission rules (Claude Code `--allowedTools` / `--disallowedTools` syntax) |
 | `AGENT_SCRUB_ENV` | common cloud and token variables | Variables removed from the environment of the agents and of `AGENT_SETUP_CMD`. If the install needs one (e.g. `NPM_TOKEN` for a private registry), set this list without it |

@@ -47,7 +47,9 @@ AGENT_TRIAGE_MAX_TURNS=${AGENT_TRIAGE_MAX_TURNS:-80}
 AGENT_TRIAGE_MAX_ACTIONS=${AGENT_TRIAGE_MAX_ACTIONS:-15}  # triage changes applied per run
 AGENT_VERIFY_TIMEOUT=${AGENT_VERIFY_TIMEOUT:-600}         # seconds the Stop hook may spend on AGENT_VERIFY_CMD
 AGENT_IGNORE_CHECKS=${AGENT_IGNORE_CHECKS:-}              # comma-separated check names that never trigger a fix run
-AGENT_NOTIFY=${AGENT_NOTIFY:-1}                           # macOS notifications
+AGENT_NOTIFY=${AGENT_NOTIFY:-1}                           # 0 turns off every notification (the @mention comments and AGENT_NOTIFY_CMD)
+AGENT_NOTIFY_USER=${AGENT_NOTIFY_USER:-}                  # GitHub login mentioned in the loop's comments on blocked issues and opened PRs
+AGENT_NOTIFY_CMD=${AGENT_NOTIFY_CMD:-}                    # command run with the title and body as arguments (ntfy, Pushover, a Slack webhook, ...)
 AGENT_LOG_DAYS=${AGENT_LOG_DAYS:-14}                      # logs older than this are deleted
 AGENT_LIMIT_PAUSE_SECONDS=${AGENT_LIMIT_PAUSE_SECONDS:-1800} # wait this long when a usage limit hits without a reset time
 AGENT_PAUSE_AT_UTILIZATION=${AGENT_PAUSE_AT_UTILIZATION:-0.8} # stop starting agents when a usage window passes this share (keeps some for you)
@@ -143,19 +145,31 @@ now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # With DRY=1, commands that change something are printed instead of run
 run() { if [ "${DRY:-0}" = 1 ]; then log "[dry-run] $*"; else "$@"; fi; }
 
-notify() { # title body
-  [ "$AGENT_NOTIFY" = 1 ] && command -v osascript >/dev/null 2>&1 || return 0
-  osascript - "$1" "$2" >/dev/null 2>&1 <<'EOF' || true
-on run argv
-  display notification (item 2 of argv) with title (item 1 of argv)
-end run
-EOF
+# Something needs a person. Two channels, both off with AGENT_NOTIFY=0:
+#  - GitHub: the loop's comments on blocked issues and opened PRs mention AGENT_NOTIFY_USER (see `mention`), and GitHub
+#    sends the mobile push and the email. (GitHub does not notify you about your own comments, so this works when the
+#    loop's `gh` account is not AGENT_NOTIFY_USER.)
+#  - AGENT_NOTIFY_CMD: run with the title and body as arguments, and the issue or PR URL in $AGENT_NOTIFY_URL.
+# A failing notification is logged and ignored. The usage-limit pause has no issue to comment on, so it only uses the command.
+notify() { # title body [url]
+  [ "$AGENT_NOTIFY" = 1 ] && [ -n "$AGENT_NOTIFY_CMD" ] || return 0
+  [ "${DRY:-0}" = 1 ] && { log "[dry-run] notify: $1: $2"; return 0; }
+  AGENT_NOTIFY_TITLE=$1 AGENT_NOTIFY_BODY=$2 AGENT_NOTIFY_URL=${3:-} \
+    bash -c "$AGENT_NOTIFY_CMD \"\$@\"" agent-loop-notify "$1" "$2" >/dev/null 2>&1 ||
+    log "notification command failed (exit $?); ignored"
+  return 0
 }
+
+# "@user" for the loop's comments, or nothing when notifications are off or no user is set
+mention() { if [ "$AGENT_NOTIFY" = 1 ] && [ -n "$AGENT_NOTIFY_USER" ]; then echo "@${AGENT_NOTIFY_USER#@}"; fi; }
 
 gh_repo() {
   [ -s "$STATE/repo" ] || gh repo view --json nameWithOwner -q .nameWithOwner >"$STATE/repo"
   cat "$STATE/repo"
 }
+
+issue_url() { echo "https://${GH_HOST:-github.com}/$(gh_repo)/issues/$1"; }
+pr_url() { echo "https://${GH_HOST:-github.com}/$(gh_repo)/pull/$1"; }
 
 wt_of() { echo "$(dirname "$REPO")/$AGENT_WT_PREFIX-$1"; }
 br_of() { echo "agent/issue-$1"; }
@@ -308,17 +322,20 @@ pr_fix_reasons() { # pr_json since
 
 # Wait for a human (agent-blocked): comment the reason on the issue and notify
 block_issue() { # issue reason
+  local cc; cc=$(mention)
   label_add "$1" "$L_BLOCKED"
   label_remove "$1" "$L_WIP"
   issue_comment "$1" "Stopped working on this.
 
 $2
 
-Write your answer or the missing information in a comment on this issue, then remove the \`$L_BLOCKED\` label to resume from where it stopped."
+Write your answer or the missing information in a comment on this issue, then remove the \`$L_BLOCKED\` label to resume from where it stopped.${cc:+
+
+cc $cc}"
   count_reset attempts "$1"
   count_reset fixes "$1"
   rm -f "$STATE/stamp/sig-$1"
-  notify "Agent stopped (#$1)" "$2"
+  notify "Agent stopped (#$1)" "$2" "$(issue_url "$1")"
 }
 
 # --- Prompts ---
