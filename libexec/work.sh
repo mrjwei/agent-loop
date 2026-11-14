@@ -44,6 +44,7 @@ if [ "$mode" = fix ]; then
 fi
 
 # --- Prompt ---
+escalate=0   # set below on the last implement attempt and the last fix round
 export T_N="$n" T_BRANCH="$br" T_WT="$wt" T_MARKER="$AGENT_MARKER" T_PR="$pr" T_RESUME="" T_REASONS=""
 if [ "$mode" = implement ]; then
   # The previous run may have died early (e.g. setup failed): the attempt limit applies to that too
@@ -56,6 +57,13 @@ if [ "$mode" = implement ]; then
   if [ "$resumed" = 1 ]; then
     T_RESUME="This worktree already holds work from an earlier attempt (attempt $attempt of $AGENT_MAX_ATTEMPTS). Inspect \`git status\` and \`git log $BASE_REF..HEAD\` and continue from it instead of starting over."
   fi
+  if [ "$attempt" -gt 1 ]; then
+    T_RESUME="${T_RESUME:+$T_RESUME
+
+}$(previous_run_note "$n" implement)"
+  fi
+  [ "$attempt" -ge "$AGENT_MAX_ATTEMPTS" ] && escalate=1
+  export T_RESUME
   prompt=$(render_prompt implement)
 else
   # Where to start reading feedback. Advanced only when a fix finishes (on failure or interruption the next run reads the same feedback)
@@ -72,7 +80,10 @@ else
          + ([.feedback[] | "  --- \(.u) at \(.t), \(.where):\n\(.b | split("\n") | map("    " + .) | join("\n"))"] | join("\n"))
        else "" end)')
   export T_REASONS
-  count_inc fixes "$n" >/dev/null
+  round=$(count_inc fixes "$n")
+  if [ "$round" -gt 1 ]; then T_RESUME=$(previous_run_note "$n" fix); fi
+  [ "$round" -ge "$AGENT_MAX_FIXES" ] && escalate=1
+  export T_RESUME
   prompt=$(render_prompt fix)
 fi
 
@@ -88,18 +99,28 @@ export AGENT_LOOP_RUN=1 AGENT_VERIFY_CMD AGENT_BASE_BRANCH
 ts=$(date +%Y%m%d-%H%M%S)
 stream="$STATE/logs/issue-$n-$ts-$mode.jsonl"   # the whole conversation
 out="${stream%.jsonl}.json"                      # the final result only
+# The last attempt (AGENT_MAX_ATTEMPTS) or fix round (AGENT_MAX_FIXES) may use a stronger model and more effort
+run_model=$AGENT_MODEL run_effort=$AGENT_EFFORT
+if [ "$escalate" = 1 ]; then
+  [ -z "$AGENT_ESCALATE_MODEL" ] || run_model=$AGENT_ESCALATE_MODEL
+  [ -z "$AGENT_ESCALATE_EFFORT" ] || run_effort=$AGENT_ESCALATE_EFFORT
+fi
+# For the Stop hook: while this file exists, the last verify run failed
+verify_mark="${stream%.jsonl}.verify-failed"
+rm -f "$verify_mark"
+export AGENT_LOOP_VERIFY_MARK="$verify_mark"
 cost_args=()
 if [ -n "$AGENT_MAX_COST_PER_RUN" ]; then
   if claude_has_cost_cap; then cost_args=(--max-budget-usd "$AGENT_MAX_COST_PER_RUN")
   else log "#$n: warning: this claude CLI has no --max-budget-usd, so AGENT_MAX_COST_PER_RUN is skipped"; fi
 fi
-log "#$n: starting $mode ($AGENT_MODEL / ${AGENT_EFFORT}, worktree ${wt}, limit ${AGENT_RUN_TIMEOUT}s)"
+log "#$n: starting $mode ($run_model / ${run_effort}$([ "$escalate" = 1 ] && echo ", last chance"), worktree ${wt}, limit ${AGENT_RUN_TIMEOUT}s)"
 rc=0 timed_out=0
 # The agent runs as the leader of its own process group (a background subshell under job control), so that the
 # timeout below can stop claude and everything it started without stopping this script
 set -m
 (printf '%s' "$prompt" | without_credentials claude -p --strict-mcp-config \
-  --model "$AGENT_MODEL" --effort "$AGENT_EFFORT" \
+  --model "$run_model" --effort "$run_effort" \
   --permission-mode "$AGENT_PERMISSION_MODE" --max-turns "$AGENT_MAX_TURNS" --settings "$(agent_settings)" \
   --allowedTools "${WORKER_ALLOW[@]}" --disallowedTools "${WORKER_DENY[@]}" ${cost_args[@]+"${cost_args[@]}"} \
   --output-format stream-json --verbose --json-schema "$WORKER_SCHEMA" --name "agent #$n $mode") \
@@ -145,6 +166,14 @@ if [ "$timed_out" = 0 ] && [ -z "$status" ] && resume_at=$(limit_resume_at "$str
   limited=1
   pause_until "$resume_at"
 fi
+# How the run ended, for the next attempt's prompt (previous_run_note)
+if [ "$timed_out" = 1 ]; then end_note="it was stopped after ${AGENT_RUN_TIMEOUT}s (AGENT_RUN_TIMEOUT)"
+elif [ "$(jq -r '.subtype // empty' "$out" 2>/dev/null)" = error_max_turns ]; then end_note="it hit the turn limit (AGENT_MAX_TURNS=$AGENT_MAX_TURNS)"
+elif [ -f "$verify_mark" ]; then end_note="the checks (AGENT_VERIFY_CMD) were still failing when it stopped"
+elif [ "$limited" = 1 ]; then end_note="it was stopped by a usage limit"
+elif [ -n "$status" ]; then end_note="it reported status: $status"
+else end_note="it ended without a result"; fi
+printf '%s\n' "$end_note" >"${stream%.jsonl}.end"
 if [ "$mode" = implement ]; then
   if [ -n "$pr_now" ]; then
     count_reset attempts "$n"

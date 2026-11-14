@@ -72,7 +72,8 @@ EOF
 cat >"$T/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 # Fake claude for test/run.sh: ignores the prompt, runs $FAKE_CLAUDE_CMD (what the "agent" does in the worktree)
-# and prints the stream in $FAKE_CLAUDE_RESULT. Records its arguments in $FAKE_CLAUDE_ARGS when set.
+# and prints the stream in $FAKE_CLAUDE_RESULT. Records its arguments in $FAKE_CLAUDE_ARGS and the prompt it was
+# given in $FAKE_CLAUDE_PROMPT when set.
 # Like the real CLI, it stops at the first unknown option (--max-budget-usd is unknown with FAKE_CLAUDE_NO_COST_CAP=1).
 case " $* " in
   *" --zz-probe "*)
@@ -80,8 +81,8 @@ case " $* " in
     else echo "error: unknown option '--zz-probe'"; fi
     exit 1 ;;
 esac
-[ -z "${FAKE_CLAUDE_ARGS:-}" ] || echo "$*" >>"$FAKE_CLAUDE_ARGS"
-cat >/dev/null
+if [ -n "${FAKE_CLAUDE_ARGS:-}" ]; then echo "$*" | tr '\n' ' ' >>"$FAKE_CLAUDE_ARGS"; echo >>"$FAKE_CLAUDE_ARGS"; fi
+cat >"${FAKE_CLAUDE_PROMPT:-/dev/null}"
 [ -z "${FAKE_CLAUDE_CMD:-}" ] || bash -c "$FAKE_CLAUDE_CMD" >/dev/null 2>&1
 cat "$FAKE_CLAUDE_RESULT"
 EOF
@@ -434,6 +435,57 @@ AGENT_MAX_PARALLEL=0 tick >/dev/null
 check "loop: agents resume when the base head passes, and that commit is remembered as good" "$head_sha" "$(cat "$STATE/base-last-green-sha")"
 check "loop: starts again after the head passes" 1 "$(tick --dry-run | grep -c 'start implement for #1')"
 runs '[]'; rm -f "$STATE/base-last-green-sha" "$STATE/base-failed-sha"
+: >"$GH_LOG"
+
+# --- A stronger model on the last attempt, and the previous failure in the next prompt (#24) ---
+result '{"status":"failed","summary":"first attempt summary","blocked_reason":"first attempt reason"}' >"$T/failed-result.jsonl"
+: >"$T/claude.args"; rm -f "$T/prompt.txt"
+for i in 1 2; do
+  FAKE_CLAUDE_ARGS="$T/claude.args" FAKE_CLAUDE_PROMPT="$T/prompt$i.txt" FAKE_CLAUDE_RESULT="$T/failed-result.jsonl" \
+    AGENT_MODEL=model-a AGENT_EFFORT=low AGENT_ESCALATE_MODEL=model-big AGENT_ESCALATE_EFFORT=max AGENT_MAX_ATTEMPTS=3 \
+    "$B" "$ROOT/libexec/work.sh" 53 >"$T/work$i.out" 2>&1
+done
+model_effort() { sed -n "$2p" "$1" | sed 's/.*--model \([^ ]*\) --effort \([^ ]*\) .*/\1 \2/'; }   # run N of an args log
+check "work: attempts before the last use AGENT_MODEL / AGENT_EFFORT" 'model-a low' "$(model_effort "$T/claude.args" 1)"
+FAKE_CLAUDE_ARGS="$T/claude.args" FAKE_CLAUDE_PROMPT="$T/prompt3.txt" FAKE_CLAUDE_RESULT="$T/failed-result.jsonl" \
+  AGENT_MODEL=model-a AGENT_EFFORT=low AGENT_ESCALATE_MODEL=model-big AGENT_ESCALATE_EFFORT=max AGENT_MAX_ATTEMPTS=3 \
+  "$B" "$ROOT/libexec/work.sh" 53 >"$T/work3.out" 2>&1
+check "work: the last attempt uses AGENT_ESCALATE_MODEL / AGENT_ESCALATE_EFFORT" 'model-big max' "$(model_effort "$T/claude.args" 3)"
+check "work: the log line that starts a run names the model actually used" '1|1' \
+  "$(grep -c 'starting implement (model-a / low, ' "$T/work1.out")|$(grep -c 'starting implement (model-big / max, last chance' "$T/work3.out")"
+check "work: the first attempt's prompt has no previous-run section" 0 "$(grep -c 'About the previous run' "$T/prompt1.txt")"
+check "work: a later attempt's prompt carries the previous summary, reason and how it ended" '1|1|1' \
+  "$(grep -c 'Its summary: first attempt summary' "$T/prompt2.txt")|$(grep -c 'Its blocked_reason: first attempt reason' "$T/prompt2.txt")|$(grep -c 'How it ended: it reported status: failed' "$T/prompt2.txt")"
+drop_work 53
+: >"$T/claude.args"
+FAKE_CLAUDE_ARGS="$T/claude.args" FAKE_CLAUDE_RESULT="$T/failed-result.jsonl" AGENT_MODEL=model-a AGENT_ESCALATE_MODEL="" \
+  "$B" "$ROOT/libexec/work.sh" 53 >/dev/null 2>&1
+check "work: without AGENT_ESCALATE_MODEL nothing changes" 'model-a' "$(model_effort "$T/claude.args" 1 | cut -d' ' -f1)"
+drop_work 53
+# A run that hits the turn limit, or leaves the checks failing, says so to the next attempt
+jq -nc '{type:"result",subtype:"error_max_turns",session_id:"sid",num_turns:150,total_cost_usd:0}' >"$T/turns-result.jsonl"
+FAKE_CLAUDE_RESULT="$T/turns-result.jsonl" "$B" "$ROOT/libexec/work.sh" 54 >/dev/null 2>&1
+FAKE_CLAUDE_PROMPT="$T/prompt-turns.txt" FAKE_CLAUDE_RESULT="$T/failed-result.jsonl" "$B" "$ROOT/libexec/work.sh" 54 >/dev/null 2>&1
+check "work: the turn limit is named in the next attempt's prompt" 1 "$(grep -c 'How it ended: it hit the turn limit (AGENT_MAX_TURNS=150)' "$T/prompt-turns.txt")"
+drop_work 54
+FAKE_CLAUDE_CMD='touch "$AGENT_LOOP_VERIFY_MARK"' FAKE_CLAUDE_RESULT="$T/failed-result.jsonl" "$B" "$ROOT/libexec/work.sh" 55 >/dev/null 2>&1
+FAKE_CLAUDE_PROMPT="$T/prompt-verify.txt" FAKE_CLAUDE_RESULT="$T/failed-result.jsonl" "$B" "$ROOT/libexec/work.sh" 55 >/dev/null 2>&1
+check "work: failing checks at the end of a run are named in the next attempt's prompt" 1 "$(grep -c 'How it ended: the checks (AGENT_VERIFY_CMD) were still failing' "$T/prompt-verify.txt")"
+drop_work 55
+count_reset fixes 3
+result '{"status":"fixed","summary":"first fix summary"}' >"$T/fix1-result.jsonl"
+: >"$T/claude.args"
+for i in 1 2; do
+  FAKE_CLAUDE_CMD="git -c user.email=t@t -c user.name=t commit -q --allow-empty -m fix$i && git push -q origin HEAD" \
+    FAKE_CLAUDE_ARGS="$T/claude.args" FAKE_CLAUDE_PROMPT="$T/fixprompt$i.txt" FAKE_CLAUDE_RESULT="$T/fix1-result.jsonl" \
+    AGENT_MODEL=model-a AGENT_ESCALATE_MODEL=model-big AGENT_MAX_FIXES=2 "$B" "$ROOT/libexec/work.sh" 3 --fix >/dev/null 2>&1
+done
+check "work: the last fix round uses the escalation model, earlier ones do not" 'model-a model-big' \
+  "$(model_effort "$T/claude.args" 1 | cut -d' ' -f1) $(model_effort "$T/claude.args" 2 | cut -d' ' -f1)"
+check "work: a later fix round's prompt carries the previous fix's summary" 1 "$(grep -c 'Its summary: first fix summary' "$T/fixprompt2.txt")"
+count_reset fixes 3
+check "prompts: the packaged implement and fix prompts have the resume placeholder" '1|1' \
+  "$(grep -c '{{RESUME}}' "$ROOT/prompts/implement.md")|$(grep -c '{{RESUME}}' "$ROOT/prompts/fix.md")"
 : >"$GH_LOG"
 
 # --- CLI ---

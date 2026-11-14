@@ -36,9 +36,14 @@ if git diff --quiet HEAD 2>/dev/null && [ -z "$(git ls-files --others --exclude-
   && git diff --quiet "origin/$base...HEAD" 2>/dev/null; then
   exit 0
 fi
+# In a loop run, work.sh names a file that exists while the last check failed, so that the next attempt can be told
+# the run ended with failing checks (the second stop is allowed even then)
+mark=${AGENT_LOOP_VERIFY_MARK:-}
 out=$(bash -c "$AGENT_VERIFY_CMD" 2>&1) || {
+  [ -z "$mark" ] || echo failed >"$mark" 2>/dev/null
   echo "Checks failed (AGENT_VERIFY_CMD). Fix them before finishing:" >&2
   echo "$out" | tail -40 >&2
   exit 2   # exit 2 = block stopping, feed stderr back to the agent
 }
+[ -z "$mark" ] || rm -f "$mark"
 exit 0
