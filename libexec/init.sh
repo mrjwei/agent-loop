@@ -44,6 +44,11 @@ check_prereqs() {
     if echo "$probe" | grep -q "unknown option '--zz-probe'"; then echo "ok       claude supports the options the loop uses"
     else echo "WARNING  claude may be too old for --json-schema / --effort / --name (update it: claude update)"; fi
   fi
+  if command -v claude >/dev/null 2>&1; then
+    if claude_has_cost_cap; then echo "ok       claude has a spend cap option (--max-budget-usd): AGENT_MAX_COST_PER_RUN works"
+    elif [ -n "$AGENT_MAX_COST_PER_RUN" ]; then echo "WARNING  claude has no --max-budget-usd: AGENT_MAX_COST_PER_RUN will be skipped"
+    else echo "info     claude has no --max-budget-usd, so AGENT_MAX_COST_PER_RUN could not be used"; fi
+  fi
   if git -C "$REPO" remote get-url origin >/dev/null 2>&1; then echo "ok       remote origin: $(git -C "$REPO" remote get-url origin)"
   else echo "WARNING  no 'origin' remote: the loop pushes branches and opens PRs through GitHub"; fi
   if ! git -C "$REPO" symbolic-ref --quiet refs/remotes/origin/HEAD >/dev/null 2>&1 && ! grep -qs '^AGENT_BASE_BRANCH=' "$AGENT_CONF"; then
