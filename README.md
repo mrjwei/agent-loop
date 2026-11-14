@@ -76,7 +76,7 @@ agent-loop version
 | 1c | Base check | Reads the check status of the head commit of `origin/<base>`. If a check has failed (ignoring `AGENT_IGNORE_CHECKS`), step 4 starts no agent until the head passes again (cleanup, resume and fix go on), and the top of `agent-loop status` says so. Once per failing commit the loop opens an issue titled for the failing checks, listing the commit, the check names and the PRs merged since the last commit it saw pass, and sends one notification. The issue gets no `agent-ok`: you decide whether to revert, fix it by hand or label it. Pending checks and a base branch without checks block nothing. No model call. |
 | 2 | Fix | An open PR on branch `agent/issue-<n>` of this repository (a PR from a fork never counts) with a conflict, a failing check or new review feedback from a trusted author gets `work --fix`. Nothing runs if nothing changed since the last fix. After 3 rounds it becomes `agent-blocked`, and so does a PR whose fix run pushed nothing while the conflict or failing check remains (for example a flaky check: re-run it, then remove the label). |
 | 3 | Triage | When nothing is ready to start and the base branch moved since the last triage, run triage (only if `AGENT_PLANS_GLOB` is set). |
-| 4 | Start | Issues with `agent-ok`, without `human` / `agent-blocked`, with no sub-issues and all dependencies closed start in number order, up to `AGENT_MAX_PARALLEL`. Dependencies are GitHub's "blocked by" relations plus a `Depends on: #12, #13` line in the body. |
+| 4 | Start | Issues with `agent-ok`, without `human` / `agent-blocked`, with no sub-issues and all dependencies closed start in number order, up to `AGENT_MAX_PARALLEL`. Dependencies are GitHub's "blocked by" relations plus a `Depends on: #12, #13` line in the body. An issue with a `Touches:` line (below) is held back for the round while its files overlap a running issue's or an open agent PR's. |
 
 While a usage limit is in effect (a rejected usage window, API 429, or overload 529), the interrupted run is not counted as a failure and steps 2-4 pause until the reset; cleanup continues. The loop also stops starting agents when any window reported in the `rate_limit_event` stream passes `AGENT_PAUSE_AT_UTILIZATION` (default 80%), so you keep some quota.
 
@@ -102,6 +102,16 @@ Three events need a person: an agent stopped (`agent-blocked`), a PR was opened,
   ```
 
   Pushover, a Slack webhook and the like work the same way: any command that reads `$1`, `$2` and `$AGENT_NOTIFY_URL`.
+
+### Issues that change the same files
+
+Issues start in number order as soon as their dependencies are closed, so two that change the same files run in parallel, and the second PR to merge gets a conflict that costs a fix run. To avoid it, an issue body may carry a line next to `Depends on:`:
+
+```
+Touches: src/billing/**, docs/api.md
+```
+
+The value is comma-separated globs (`*`, `?`, `[...]`; a `*` also matches `/`, so `**` works; a trailing `/` means everything below). In the start step an issue is held back for this round while its globs overlap (a) the `Touches` globs of a running issue, or of an issue started earlier in the same round, or (b) the changed files of an open agent PR (`gh pr view --json files`). It starts in a later round, once that issue or PR is gone. Issues without the line behave as before, and the check is conservative (when two patterns might overlap, they are treated as overlapping). The triage prompt asks for a `Touches:` line when a plan makes the files clear. `agent-loop status` shows the ready issues that are held back and why. The check is done by the scripts; no model call.
 
 ### Labels
 

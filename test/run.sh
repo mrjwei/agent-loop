@@ -34,6 +34,7 @@ case "$*" in
   "repo view"*) echo "o/r" ;;
   "pr list --head "*) # --head <branch> --state <state>
     jq --arg b "$4" --arg s "$6" '[.[] | select(.headRefName == $b and ($s == "all" or (.state | ascii_downcase) == $s))]' "$FIX/prs.json" | jq -r "$q" ;;
+  "pr view "*" --json files"*) f="$FIX/pr-files-$3.json"; if [ -f "$f" ]; then jq -r "$q" "$f"; else echo '{"files":[]}' | jq -r "$q"; fi ;;
   "pr list --state merged"*) cat "$FIX/merged.json" ;;
   "api repos/o/r/commits/"*"/check-runs "*) jq "$q" "$FIX/check-runs.json" | { [ "$q" = . ] && cat || jq -r . ; } ;;
   "api repos/o/r/commits/"*"/status "*) jq "$q" "$FIX/status.json" | { [ "$q" = . ] && cat || jq -r . ; } ;;
@@ -515,6 +516,50 @@ check "lessons: --days leaves out older ones, and a longer period includes them"
 rm -f "$LESSONS_FILE"
 check "lessons: with nothing recorded the command says so" 1 "$("$ROOT/bin/agent-loop" lessons | grep -c 'nothing recorded yet')"
 "$ROOT/bin/agent-loop" lessons --days x >/dev/null 2>&1; check "lessons: a bad --days is refused" 1 $?
+: >"$GH_LOG"
+
+# --- Issues that declare the same files do not run at once (#26) ---
+ov() { globs_overlap "$1" "$2" && echo y || echo n; }
+check "globs_overlap: patterns and paths" 'y n y y y n y y' \
+  "$(ov 'src/billing/**' 'src/billing/a.ts') $(ov 'src/billing/**' 'src/auth/**') $(ov docs/api.md docs/api.md) $(ov docs/api.md 'docs/*.md') $(ov 'src/**' 'src/billing/**') $(ov 'a/**' 'b/**') $(ov '**/*.md' 'docs/x.md') $(ov 'src/billing/' 'src/billing/x.ts')"
+check "globs_overlap: different literal paths do not overlap" 'n n' "$(ov docs/api.md docs/other.md) $(ov README.md docs/README.md)"
+{ node 70 a '["agent-ok"]' '{"body":"text\nTouches: src/billing/**, `docs/api.md` ,\n"}'; } | jq -s . | snapshot_normalize >"$T/touches.json"
+check "snapshot: a Touches line is parsed into globs (backticks and spaces dropped)" '["src/billing/**","docs/api.md"]' "$(jq -c '.[0].touches' "$T/touches.json")"
+check "snapshot: no Touches line, no globs" '[]' "$(issues_snapshot | jq -c '[.[].touches[]]')"
+
+# five ready issues: 70 and 71 overlap, 72 is disjoint, 73 overlaps the files of open PR #20, 74 has no Touches line
+cp "$FIX/page1.json" "$T/page1.orig"; cp "$FIX/page2.json" "$T/page2.orig"; cp "$FIX/prs.json" "$T/prs.touches.orig"
+{
+  echo '{"data":{"repository":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":['
+  node 70 billing '["agent-ok"]' '{"body":"Touches: src/billing/**"}'; echo ,
+  node 71 invoice '["agent-ok"]' '{"body":"Touches: src/billing/invoice.ts"}'; echo ,
+  node 72 docs '["agent-ok"]' '{"body":"Touches: docs/**"}'; echo ,
+  node 73 lib '["agent-ok"]' '{"body":"Touches: lib/*.ts"}'; echo ,
+  node 74 plain '["agent-ok"]'
+  echo ']}}}}'
+} >"$FIX/page1.json"
+echo '{"files":[{"path":"README.md"},{"path":"lib/x.ts"}]}' >"$FIX/pr-files-20.json"
+out=$(tick --dry-run)
+check "loop: overlapping globs start one after the other, disjoint ones together, no Touches line starts as before" '70 72 74' \
+  "$(echo "$out" | sed -n 's/.*start implement for #\([0-9]*\).*/\1/p' | tr '\n' ' ' | sed 's/ $//')"
+check "loop: the held-back issues say why" '1|1' \
+  "$(echo "$out" | grep -c '#71: waits this round: its files (src/billing/invoice.ts) overlap #70, which is running (Touches: src/billing/\*\*)')|$(echo "$out" | grep -c '#73: waits this round: its files (lib/\*.ts) overlap the open PR of #3 (lib/x.ts)')"
+# a running issue (a live process) holds back overlapping issues in later rounds
+sleep 60 & sleeper=$!
+echo "$sleeper" >"$STATE/running/70.pid"
+out=$(tick --dry-run)
+check "loop: an issue that is running holds back an overlapping one in the next round" '72 74' \
+  "$(echo "$out" | sed -n 's/.*start implement for #\([0-9]*\).*/\1/p' | tr '\n' ' ' | sed 's/ $//')"
+out=$("$B" "$ROOT/libexec/loop.sh" --status 2>&1)
+check "status: lists the ready issues that are held back, and by what" '1|1' \
+  "$(echo "$out" | grep -c '#71 invoice  \[held back: its files (src/billing/invoice.ts) overlap #70, which is running')|$(echo "$out" | grep -c '#73 lib  \[held back: .*open PR of #3 (lib/x.ts)')"
+kill "$sleeper" 2>/dev/null; wait "$sleeper" 2>/dev/null; rm -f "$STATE/running/70.pid"
+# once that PR is merged or closed, the issue that waited for it starts
+jq 'map(if .number == 20 then .state = "MERGED" else . end)' "$FIX/prs.json" >"$T/prs.merged" && cp "$T/prs.merged" "$FIX/prs.json"
+out=$(tick --dry-run)
+check "loop: an issue waits for the open PR's files only while that PR is open" 'start implement for #73' "$(echo "$out" | grep -o 'start implement for #73')"
+cp "$T/page1.orig" "$FIX/page1.json"; cp "$T/page2.orig" "$FIX/page2.json"; cp "$T/prs.touches.orig" "$FIX/prs.json"; rm -f "$FIX/pr-files-20.json"
+check "prompts: triage is asked for a Touches line" 1 "$(grep -c 'Touches: src/billing' "$ROOT/prompts/triage.md")"
 : >"$GH_LOG"
 
 # --- CLI ---
