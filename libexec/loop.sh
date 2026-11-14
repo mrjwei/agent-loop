@@ -6,7 +6,8 @@
 #   3. Triage:   when nothing is ready to start and the base branch moved since the last triage, run triage.sh
 #   4. Start:    run work.sh in parallel for issues that are agent-ok with all dependencies closed, up to the free slots
 # Merging a PR closes the dependency of the issues waiting on it, so the next round starts them.
-# When today's spend reaches AGENT_DAILY_BUDGET, steps 2-4 are skipped until the next local day (cleanup continues).
+# When today's spend reaches AGENT_DAILY_BUDGET (dollars) or today's tokens reach AGENT_DAILY_TOKEN_BUDGET, steps 2-4
+# are skipped until the next local day (cleanup continues).
 # When a usage limit hits, the run is not counted as a failure, and steps 2-4 stop until it resets (cleanup continues).
 #
 # Usage: agent-loop start [--once] [--dry-run] [--no-triage]
@@ -191,6 +192,7 @@ phase_launch() {
 }
 
 do_tick() {
+  local why
   git -C "$REPO" fetch origin --prune --quiet
   running_count >/dev/null   # drops the pid files of finished agents
   issues_snapshot >"$ISSUES_JSON"
@@ -200,11 +202,11 @@ do_tick() {
     log "Paused by a usage limit until $(fmt_epoch "$(paused_until)"); not starting agents (resume now: agent-loop unpause)"
     return 0
   fi
-  if over_budget; then
-    log "Daily budget reached: \$$(spend_today) of \$${AGENT_DAILY_BUDGET} spent today (AGENT_DAILY_BUDGET); not fixing or starting agents until tomorrow"
+  if why=$(budget_reason) && [ -n "$why" ]; then
+    log "Daily budget reached: ${why}; not fixing or starting agents until tomorrow"
     if [ "$(cat "$STATE/budget-notified" 2>/dev/null)" != "$(date +%Y%m%d)" ]; then
       [ "$DRY" = 1 ] || date +%Y%m%d >"$STATE/budget-notified"
-      notify "Agents paused" "Daily budget reached: \$$(spend_today) of \$${AGENT_DAILY_BUDGET}. No agent starts until tomorrow."
+      notify "Agents paused" "Daily budget reached: ${why}. No agent starts until tomorrow."
     fi
     return 0
   fi
@@ -215,10 +217,14 @@ do_tick() {
 }
 
 show_status() {
-  local f n
+  local f n usage
   paused && echo "== Paused by a usage limit until $(fmt_epoch "$(paused_until)") (resume now: agent-loop unpause)"
   over_budget && echo "== Daily budget reached: no agent starts until tomorrow"
-  echo "== Spend today: \$$(spend_today)$([ -n "$AGENT_DAILY_BUDGET" ] && echo " of \$${AGENT_DAILY_BUDGET} (AGENT_DAILY_BUDGET)" || echo ' (AGENT_DAILY_BUDGET is not set)')"
+  echo "== Usage today"
+  echo "tokens: $(fmt_tokens "$(tokens_today)")$([ -n "$AGENT_DAILY_TOKEN_BUDGET" ] && echo " of $(fmt_tokens "$AGENT_DAILY_TOKEN_BUDGET") (AGENT_DAILY_TOKEN_BUDGET)" || echo ' (AGENT_DAILY_TOKEN_BUDGET is not set)')"
+  echo "API-equivalent cost: \$$(spend_today)$([ -n "$AGENT_DAILY_BUDGET" ] && echo " of \$${AGENT_DAILY_BUDGET} (AGENT_DAILY_BUDGET)" || echo ' (AGENT_DAILY_BUDGET is not set)')"
+  echo "== Plan usage windows, as of the last run (pauses at $(awk -v t="$AGENT_PAUSE_AT_UTILIZATION" 'BEGIN { printf "%d", t * 100 }')%, AGENT_PAUSE_AT_UTILIZATION)"
+  usage=$(show_usage_windows); echo "${usage:-none reported yet (only Pro / Max plans report them)}"
   echo "== Running agents"
   for f in "$STATE"/running/*.pid; do
     [ -f "$f" ] || continue
