@@ -257,6 +257,45 @@ AGENT_MAX_PARALLEL=0 tick >/dev/null
 check "loop: the handled PR does not clean up the new work" 'kept|0' \
   "$(git -C "$T/proj" rev-parse -q --verify agent/issue-1 >/dev/null && echo kept)|$(wc -l <"$GH_LOG" | tr -d ' ')"
 
+# --- Notifications: GitHub mentions and AGENT_NOTIFY_CMD ---
+cat >"$T/notify.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s|%s|%s\n' "$1" "$2" "$AGENT_NOTIFY_URL" >>"$NOTIFY_OUT"
+EOF
+chmod +x "$T/notify.sh"
+export NOTIFY_OUT="$T/notify.out"
+: >"$NOTIFY_OUT"; : >"$GH_LOG"
+AGENT_NOTIFY=1 AGENT_NOTIFY_USER=alice AGENT_NOTIFY_CMD="$T/notify.sh" block_issue 3 "needs a decision"
+check "notify: a blocked issue's comment mentions AGENT_NOTIFY_USER" '1|1' \
+  "$(grep -c '^issue comment 3 ' "$GH_LOG")|$(grep -c '^cc @alice$' "$GH_LOG")"
+check "notify: AGENT_NOTIFY_CMD gets title, body and URL for a blocked issue" \
+  'Agent stopped (#3)|needs a decision|https://github.com/o/r/issues/3' "$(cat "$NOTIFY_OUT")"
+: >"$NOTIFY_OUT"; : >"$GH_LOG"
+AGENT_NOTIFY=0 AGENT_NOTIFY_USER=alice AGENT_NOTIFY_CMD="$T/notify.sh" block_issue 3 "x"
+check "notify: AGENT_NOTIFY=0 sends nothing and mentions nobody" '0|0' "$(grep -c '@alice' "$GH_LOG")|$(wc -l <"$NOTIFY_OUT" | tr -d ' ')"
+cp "$FIX/prs.json" "$T/prs.json.orig"
+result '{"status":"pr_opened","pr_number":50,"summary":"done"}' >"$T/pr-result.jsonl"
+: >"$GH_LOG"
+export NEW_PR='{number:50,state:"OPEN",title:"p",headRefName:"agent/issue-50",headRefOid:"x",isCrossRepository:false,mergeable:"MERGEABLE",statusCheckRollup:[]}'
+AGENT_NOTIFY=1 AGENT_NOTIFY_USER=alice AGENT_NOTIFY_CMD="$T/notify.sh" FAKE_CLAUDE_RESULT="$T/pr-result.jsonl" \
+  FAKE_CLAUDE_CMD='jq ". + [$NEW_PR]" "$FIX/prs.json" >"$FIX/prs.new" && mv "$FIX/prs.new" "$FIX/prs.json"' \
+  "$B" "$ROOT/libexec/work.sh" 50 >"$T/work.out" 2>&1
+check "notify: an opened PR gets a comment that mentions AGENT_NOTIFY_USER" 1 "$(grep -c '^pr comment 50 .*PR opened for #50.* @alice' "$GH_LOG")"
+check "notify: AGENT_NOTIFY_CMD gets title, body and URL for an opened PR" \
+  'PR opened (#50)|PR #50: done|https://github.com/o/r/pull/50' "$(cat "$NOTIFY_OUT")"
+cp "$T/prs.json.orig" "$FIX/prs.json"
+git -C "$T/proj" worktree remove --force "$(wt_of 50)"; git -C "$T/proj" branch -qD agent/issue-50
+: >"$NOTIFY_OUT"; : >"$GH_LOG"
+AGENT_NOTIFY=1 AGENT_NOTIFY_CMD="$T/notify.sh" pause_until $((now + 5000)) "Stopped by a usage limit" 2>/dev/null
+check "notify: the usage-limit pause goes through AGENT_NOTIFY_CMD only" '1|0' \
+  "$(grep -c '^Agents paused|Stopped by a usage limit. Resuming at .*|$' "$NOTIFY_OUT")|$(wc -l <"$GH_LOG" | tr -d ' ')"
+rm -f "$PAUSE_FILE"
+out=$(AGENT_NOTIFY=1 AGENT_NOTIFY_CMD='exit 3' notify t b 2>&1); rc=$?
+check "notify: a failing AGENT_NOTIFY_CMD is logged and ignored" '0|1' "$rc|$(echo "$out" | grep -c 'notification command failed')"
+check "notify: no code path calls osascript, and the README does not list it" '' \
+  "$(grep -rIl osascript "$ROOT/bin" "$ROOT/lib" "$ROOT/libexec" "$ROOT/prompts" "$ROOT/templates" "$ROOT/README.md" 2>/dev/null)"
+: >"$GH_LOG"
+
 # --- CLI ---
 check "cli: version" "$(cat "$ROOT/VERSION")" "$("$ROOT/bin/agent-loop" version)"
 "$ROOT/bin/agent-loop" nope >/dev/null 2>&1; check "cli: unknown command exits 2" 2 $?

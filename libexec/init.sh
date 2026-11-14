@@ -124,7 +124,9 @@ check_prereqs || die "install the missing tools first"
 echo
 
 detect_commands
-export T_SETUP_CMD="$SETUP" T_VERIFY_CMD="$VERIFY" T_WT_PREFIX="$AGENT_WT_PREFIX"
+# The authenticated GitHub user is who the loop's comments mention (AGENT_NOTIFY_USER)
+export T_SETUP_CMD="$SETUP" T_VERIFY_CMD="$VERIFY" T_WT_PREFIX="$AGENT_WT_PREFIX" \
+  T_NOTIFY_USER="${AGENT_NOTIFY_USER:-$(gh api user -q .login 2>/dev/null || true)}"
 render "$PKG_DIR/templates/agent-loop.conf" | put "$REPO/.agent-loop.conf"
 put "$PROMPTS_DIR/project.md" <"$PKG_DIR/templates/project.md"
 [ "$hook" = 1 ] && install_hook

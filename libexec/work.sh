@@ -120,7 +120,10 @@ if [ "$mode" = implement ]; then
   if [ -n "$pr_now" ]; then
     count_reset attempts "$n"
     stamp_set handled "$n" "$(now_iso)"   # only comments after this count as "new feedback"
-    notify "PR opened (#${n})" "PR #$pr_now: ${summary:-}"
+    cc=$(mention)
+    # A comment that mentions AGENT_NOTIFY_USER: GitHub sends the push and the email (the PR itself was opened by the agent)
+    [ -z "$cc" ] || run gh pr comment "$pr_now" --body "$AGENT_MARKER PR opened for #$n. Ready for review. $cc" >/dev/null || true
+    notify "PR opened (#${n})" "PR #$pr_now: ${summary:-}" "$(pr_url "$pr_now")"
     exit 0
   fi
   if [ "$limited" = 1 ]; then
