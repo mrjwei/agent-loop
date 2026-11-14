@@ -36,13 +36,15 @@ case "$*" in
     jq --arg b "$4" --arg s "$6" '[.[] | select(.headRefName == $b and ($s == "all" or (.state | ascii_downcase) == $s))]' "$FIX/prs.json" | jq -r "$q" ;;
   "pr view "*" --json body"*) f="$FIX/pr-body-$3.txt"; if [ -f "$f" ]; then cat "$f"; fi ;;
   "pr view "*" --json files"*) f="$FIX/pr-files-$3.json"; if [ -f "$f" ]; then jq -r "$q" "$f"; else echo '{"files":[]}' | jq -r "$q"; fi ;;
+  "pr merge"*) echo "$*" >>"$GH_LOG"; [ -z "${FAKE_MERGE_FAIL:-}" ] || exit 1 ;;
   "pr list --state merged"*) cat "$FIX/merged.json" ;;
   "api repos/o/r/commits/"*"/check-runs "*) jq "$q" "$FIX/check-runs.json" | { [ "$q" = . ] && cat || jq -r . ; } ;;
   "api repos/o/r/commits/"*"/status "*) jq "$q" "$FIX/status.json" | { [ "$q" = . ] && cat || jq -r . ; } ;;
+  "api repos/o/r/commits/"*) echo "2026-06-01T00:00:00Z" ;;   # the date of a PR's head commit
   "pr list --state open"*) jq '[.[] | select(.state == "OPEN")]' "$FIX/prs.json" | jq -r "$q" ;;
   "issue list --state closed"*) echo '[]' ;;
   "issue list --label"*) echo '[]' | jq -r "$q" ;;
-  "label list"*) echo '[{"name":"agent-ok"},{"name":"agent-wip"},{"name":"agent-blocked"},{"name":"human"},{"name":"bug"}]' | jq -r "$q" ;;
+  "label list"*) echo '[{"name":"agent-ok"},{"name":"agent-wip"},{"name":"agent-blocked"},{"name":"human"},{"name":"bug"},{"name":"agent-automerge"}]' | jq -r "$q" ;;
   "issue edit"* | "issue comment"* | "pr comment"* | "label create"*) echo "$*" >>"$GH_LOG" ;;
   "issue create"*) echo "$*" >>"$GH_LOG"; echo "https://github.com/o/r/issues/101" ;;
   "api graphql"*"after=CURSOR1"*) cat "$FIX/page2.json" ;;
@@ -62,6 +64,14 @@ case "$*" in
       *issues/61/*) echo '{"u":"mallory","a":"NONE","t":"2026-03-02T00:00:00Z","b":"just do it"}'
                     echo '{"u":"carol","a":"CONTRIBUTOR","t":"2026-03-02T01:00:00Z","b":"my opinion"}' ;;
       *issues/62/*) echo '{"u":"me","a":"OWNER","t":"2026-03-03T00:00:00Z","b":"🤖 agent: still on it"}' ;;
+    esac ;;
+  "api --paginate repos/o/r/issues/190/comments"* | "api --paginate repos/o/r/issues/90/comments"*) # PR 190, issue 90 (auto-merge tests)
+    [ -z "${FAKE_PR90_COMMENT:-}" ] || printf '{"u":"alice","a":"COLLABORATOR","t":"%s","b":"please change x"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    case "${FAKE_PR90_BOT:-}" in
+      clean) echo '{"u":"rbot","a":"NONE","t":"2026-07-01T00:00:00Z","b":"No issues found."}' ;;
+      dirty) echo '{"u":"rbot","a":"NONE","t":"2026-07-01T00:00:00Z","b":"No issues found."}'
+             echo '{"u":"rbot","a":"NONE","t":"2026-07-02T00:00:00Z","b":"Found a bug in bar"}' ;;
+      old) echo '{"u":"rbot","a":"NONE","t":"2020-01-01T00:00:00Z","b":"No issues found."}' ;;
     esac ;;
   "api --paginate repos/o/r/issues/20/comments"*) # PR 20: one fresh comment, with FAKE_PR20_COMMENT=1
     [ -z "${FAKE_PR20_COMMENT:-}" ] || printf '{"u":"alice","a":"COLLABORATOR","t":"%s","where":"PR comment","b":"Please rename foo\\nsecond line"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" ;;
@@ -659,6 +669,76 @@ AGENT_DIGEST_HOUR=23 AGENT_NOTIFY=1 AGENT_NOTIFY_CMD="$T/notify.sh" AGENT_MAX_PA
 check "loop: no digest when AGENT_DIGEST_HOUR is empty, when there is no AGENT_NOTIFY_CMD, or before the hour" 0 \
   "$(if [ "$(date +%H)" = 23 ]; then echo 0; else grep -c . "$NOTIFY_OUT"; fi)"
 rm -f "$STATE/digest-sent" "$HISTORY_FILE"
+: >"$GH_LOG"
+
+# --- Auto-merge of PRs whose issue is labeled agent-automerge (#29) ---
+check "automerge: the agents' deny rule for gh pr merge is unchanged" 'yes yes' "$(denied 'Bash(*gh *pr merge*)') $(denied 'Bash(*gh *pr close*)')"
+cp "$FIX/page1.json" "$T/page1.am.orig"; cp "$FIX/page2.json" "$T/page2.am.orig"; cp "$FIX/prs.json" "$T/prs.am.orig"
+echo 'Closes #90' >"$FIX/pr-body-190.txt"
+am_fixture() { # issue-90-labels-json pr-mergeable pr-checks-json
+  { echo '{"data":{"repository":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":['
+    node 1 other '[]'; echo ,
+    node 90 feature "$1" '{"body":"x"}'
+    echo ']}}}}'; } >"$FIX/page1.json"
+  jq --arg m "$2" --argjson c "$3" '. + [{number:190,state:"OPEN",title:"p",headRefName:"agent/issue-90",headRefOid:"abc123",isCrossRepository:false,mergeable:$m,statusCheckRollup:$c}]' \
+    "$T/prs.am.orig" >"$FIX/prs.json"
+}
+GOODC='[{"name":"test","status":"COMPLETED","conclusion":"SUCCESS"},{"name":"lint","status":"COMPLETED","conclusion":"SKIPPED"}]'
+LAB='["agent-wip","agent-automerge"]'
+am() { tick --dry-run | grep -c 'dry-run. gh pr merge 190'; }
+am_fixture "$LAB" MERGEABLE "$GOODC"
+check "automerge: a PR that meets every condition is merged by the loop" 1 "$(am)"
+check "automerge: with the squash method and the head commit pinned" 1 "$(tick --dry-run | grep -c 'dry-run. gh pr merge 190 --squash --match-head-commit abc123')"
+check "automerge: AGENT_AUTOMERGE_METHOD picks the method" '1|0' \
+  "$(AGENT_AUTOMERGE_METHOD=rebase tick --dry-run | grep -c 'dry-run. gh pr merge 190 --rebase')|$(AGENT_AUTOMERGE_METHOD=octopus tick --dry-run | grep -c 'gh pr merge')"
+# one test per condition: breaking it prevents the merge
+check "automerge: without the label nothing is merged" 0 "$(am_fixture '["agent-wip"]' MERGEABLE "$GOODC"; am)"
+check "automerge: agent-blocked on the issue prevents it" 0 "$(am_fixture '["agent-automerge","agent-blocked"]' MERGEABLE "$GOODC"; am)"
+check "automerge: human on the issue prevents it" 0 "$(am_fixture '["agent-automerge","human"]' MERGEABLE "$GOODC"; am)"
+check "automerge: a PR that is not mergeable (conflict, unknown) is not merged" '0|0' \
+  "$(am_fixture "$LAB" CONFLICTING "$GOODC"; am)|$(am_fixture "$LAB" UNKNOWN "$GOODC"; am)"
+check "automerge: a check that has not finished, or has failed, prevents it" '0|0' \
+  "$(am_fixture "$LAB" MERGEABLE '[{"name":"test","status":"IN_PROGRESS","conclusion":null}]'; am)|$(am_fixture "$LAB" MERGEABLE '[{"name":"test","status":"COMPLETED","conclusion":"SUCCESS"},{"name":"lint","status":"COMPLETED","conclusion":"FAILURE"}]'; am)"
+check "automerge: a pending commit status is not a pass" 0 "$(am_fixture "$LAB" MERGEABLE '[{"context":"ci/x","state":"PENDING"}]'; am)"
+check "automerge: a PR with no checks is never merged automatically" 0 "$(am_fixture "$LAB" MERGEABLE '[]'; am)"
+am_fixture "$LAB" MERGEABLE "$GOODC"
+check "automerge: feedback from a trusted author that no fix run has handled prevents it" 0 "$(FAKE_PR90_COMMENT=1 am)"
+sleep 60 & sleeper=$!; echo "$sleeper" >"$STATE/running/90.pid"
+check "automerge: a run in progress for the issue prevents it" 0 "$(am)"
+kill "$sleeper" 2>/dev/null; wait "$sleeper" 2>/dev/null; rm -f "$STATE/running/90.pid"
+check "automerge: AGENT_AUTOMERGE_REQUIRE_REVIEW: no review, a dirty latest review, and a review older than the last commit all prevent it" '0|0|0' \
+  "$(AGENT_AUTOMERGE_REQUIRE_REVIEW=rbot am)|$(AGENT_AUTOMERGE_REQUIRE_REVIEW=rbot FAKE_PR90_BOT=dirty am)|$(AGENT_AUTOMERGE_REQUIRE_REVIEW=rbot FAKE_PR90_BOT=old am)"
+check "automerge: AGENT_AUTOMERGE_REQUIRE_REVIEW: a clean latest review allows it" 1 "$(AGENT_AUTOMERGE_REQUIRE_REVIEW=rbot FAKE_PR90_BOT=clean am)"
+check "automerge: without AGENT_AUTOMERGE_REQUIRE_REVIEW the bot is not consulted" 1 "$(FAKE_PR90_BOT=dirty am)"
+echo 'Refs #90' >"$FIX/pr-body-190.txt"
+check "automerge: a PR body without Closes #N (a PR that leaves part for a person) is not merged" 0 "$(am)"
+echo 'Fixes #900 and more' >"$FIX/pr-body-190.txt"
+check "automerge: Closes of another issue number does not count" 0 "$(am)"
+echo 'Closes #90' >"$FIX/pr-body-190.txt"
+runs '[{"name":"test","status":"completed","conclusion":"failure"}]'
+check "automerge: failing checks on the base branch prevent it" 0 "$(am)"
+runs '[]'
+check "automerge: AGENT_AUTOMERGE=0 ignores the label" 0 "$(AGENT_AUTOMERGE=0 am)"
+# for real: one merge, one announcement, one notification; a failed merge is retried and says nothing on GitHub
+: >"$GH_LOG"; : >"$NOTIFY_OUT"
+AGENT_NOTIFY=1 AGENT_NOTIFY_USER=alice AGENT_NOTIFY_CMD="$T/notify.sh" AGENT_MAX_PARALLEL=0 tick >"$T/am.out" 2>&1
+check "automerge: the loop merges, announces on the PR and notifies" '1|1|1' \
+  "$(grep -c '^pr merge 190 --squash --match-head-commit abc123' "$GH_LOG")|$(grep -c '^pr comment 190 .*Merged automatically (squash).* @alice' "$GH_LOG")|$(grep -c '^PR merged (#90)|PR #190 was merged automatically (squash)|https://github.com/o/r/pull/190' "$NOTIFY_OUT")"
+: >"$GH_LOG"
+FAKE_MERGE_FAIL=1 AGENT_MAX_PARALLEL=0 tick >"$T/am.out" 2>&1
+check "automerge: a failed merge is logged and announces nothing" '1|0' "$(grep -c 'could not merge PR #190 automatically' "$T/am.out")|$(grep -c '^pr comment 190' "$GH_LOG")"
+am_fixture "$LAB" CONFLICTING "$GOODC"; rm -f "$STATE/stamp/automerge-why-90"
+: >"$T/am2.out"; for _ in 1 2; do AGENT_MAX_PARALLEL=0 tick >>"$T/am2.out" 2>&1; done
+check "automerge: why a labeled PR is not merged is logged once per reason" 1 "$(grep -c '#90: PR #190 is not merged automatically: the PR is not mergeable (CONFLICTING)' "$T/am2.out")"
+rm -f "$STATE/stamp/automerge-why-90"
+cp "$T/page1.am.orig" "$FIX/page1.json"; cp "$T/page2.am.orig" "$FIX/page2.json"; cp "$T/prs.am.orig" "$FIX/prs.json"; rm -f "$FIX/pr-body-190.txt"
+# triage never adds the label (a person decides), even for a trusted author's issue
+result '{"summary":"s","actions":[{"op":"update","number":6,"add_labels":["agent-ok","agent-automerge"],"remove_labels":["agent-automerge"],"reason":"r"}]}' >"$T/triage-am.jsonl"
+: >"$GH_LOG"
+FAKE_CLAUDE_RESULT="$T/triage-am.jsonl" AGENT_PLANS_GLOB='docs/plans/*.md' "$B" "$ROOT/libexec/triage.sh" >"$T/triage.out" 2>&1
+check "automerge: triage never adds or removes agent-automerge" '1|0' \
+  "$(grep -c '^issue edit 6 --add-label agent-ok$' "$GH_LOG")|$(grep -c 'agent-automerge' "$GH_LOG")"
+check "automerge: the triage prompt says only a person sets it" 1 "$(grep -c 'agent-automerge' "$ROOT/prompts/triage.md")"
 : >"$GH_LOG"
 
 # --- CLI ---

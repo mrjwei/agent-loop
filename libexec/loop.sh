@@ -4,6 +4,7 @@
 #                after its PR was merged or closed loses agent-ok, so the same work does not start again
 #      Resume:   an agent-blocked issue answered by a trusted author loses agent-blocked (AGENT_AUTO_RESUME)
 #      Base check: while checks fail on the head of origin/<base>, step 4 does not start agents (an issue is opened once)
+#      Auto-merge: the loop merges the PR of an agent-automerge issue when every condition holds (AGENT_AUTOMERGE)
 #   2. Fix:      for an agent PR with a conflict, a failing check or new review feedback, run work.sh --fix
 #   3. Triage:   when nothing is ready to start and the base branch moved since the last triage, run triage.sh
 #   4. Start:    run work.sh in parallel for issues that are agent-ok with all dependencies closed, up to the free slots
@@ -205,6 +206,65 @@ cc $cc}"
   fi
 }
 
+# --- Auto-merge ---
+# The loop itself (not an agent: `gh pr merge` stays denied to them) merges an open agent PR whose issue a person labeled
+# agent-automerge, when every condition holds. The loop adds no review pass: it costs no tokens. Anyone who can label
+# issues can cause a merge, so the label is the person's decision, and the conditions are the safety net.
+automerge_blocker() { # pr_json -> why the loop may not merge this PR now (nothing = it may); its issue has the label
+  local p=$1 n pr head body
+  n=$(echo "$p" | jq -r .issue); pr=$(echo "$p" | jq -r .pr); head=$(echo "$p" | jq -r .head)
+  issue_open "$n" || { echo "the issue is closed"; return 0; }
+  if has_label "$ISSUES_JSON" "$n" "$L_BLOCKED"; then echo "the issue is labeled $L_BLOCKED"; return 0; fi
+  if has_label "$ISSUES_JSON" "$n" "$L_HUMAN"; then echo "the issue is labeled $L_HUMAN"; return 0; fi
+  if is_running "$n"; then echo "an agent run is in progress"; return 0; fi
+  if [ -n "$BASE_FAILING" ]; then echo "checks are failing on $BASE_REF ($BASE_FAILING)"; return 0; fi
+  if [ "$(echo "$p" | jq -r .mergeable)" != MERGEABLE ]; then echo "the PR is not mergeable ($(echo "$p" | jq -r .mergeable))"; return 0; fi
+  # Every check finished and passed; a PR with no checks is never merged automatically
+  echo "$p" | jq -r '.checks | if length == 0 then "the PR has no checks"
+    elif all(.[]; .status == "COMPLETED" and ((.conclusion // "") as $c | ["SUCCESS", "NEUTRAL", "SKIPPED"] | index($c))) then empty
+    else "not every check has finished and passed" end' | grep . && return 0
+  # No feedback from a trusted author that a fix run has not handled yet
+  if [ "$(pr_fix_reasons "$p" "$(stamp_get handled "$n")" | jq '.needed')" = true ]; then echo "the PR has feedback, a conflict or a failing check that no fix run has handled"; return 0; fi
+  body=$(gh pr view "$pr" --json body -q .body 2>/dev/null || true)
+  if ! echo "$body" | grep -Eiq "(^|[^[:alnum:]])(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]*:?[[:space:]]*#$n([^0-9]|$)"; then
+    echo "the PR body does not contain \`Closes #$n\` (a PR that leaves part for a person is not merged)"; return 0
+  fi
+  if [ -n "$AGENT_AUTOMERGE_REQUIRE_REVIEW" ] && ! review_is_clean "$pr" "$head" "$AGENT_AUTOMERGE_REQUIRE_REVIEW"; then
+    echo "the latest review or comment of $AGENT_AUTOMERGE_REQUIRE_REVIEW is not clean, or older than the last commit"; return 0
+  fi
+  return 0
+}
+
+phase_automerge() {
+  local p n pr head why cc
+  [ "$AGENT_AUTOMERGE" = 1 ] || return 0
+  case "$AGENT_AUTOMERGE_METHOD" in squash | merge | rebase) ;; *) log "AGENT_AUTOMERGE_METHOD must be squash, merge or rebase: not merging"; return 0 ;; esac
+  while IFS= read -r p <&3; do
+    n=$(echo "$p" | jq -r .issue); pr=$(echo "$p" | jq -r .pr); head=$(echo "$p" | jq -r .head)
+    has_label "$ISSUES_JSON" "$n" "$L_AUTOMERGE" || continue
+    why=$(automerge_blocker "$p")
+    if [ -n "$why" ]; then
+      # say it once per reason, not every round
+      if [ "$(stamp_get automerge-why "$n" "")" != "$why" ]; then
+        log "#$n: PR #$pr is not merged automatically: $why"
+        [ "$DRY" = 1 ] || stamp_set automerge-why "$n" "$why"
+      fi
+      continue
+    fi
+    if run gh pr merge "$pr" "--$AGENT_AUTOMERGE_METHOD" --match-head-commit "$head" >/dev/null; then
+      log "#$n: merged PR #$pr automatically ($AGENT_AUTOMERGE_METHOD)"
+      cc=$(mention)
+      run gh pr comment "$pr" --body "$AGENT_MARKER Merged automatically ($AGENT_AUTOMERGE_METHOD): #$n is labeled \`$L_AUTOMERGE\`, the PR was mergeable, every check had passed, no feedback was waiting for a fix run, and it closes #$n.${AGENT_AUTOMERGE_REQUIRE_REVIEW:+ The latest review of $AGENT_AUTOMERGE_REQUIRE_REVIEW was clean.}${cc:+ $cc}" >/dev/null || true
+      notify "PR merged (#$n)" "PR #$pr was merged automatically ($AGENT_AUTOMERGE_METHOD)" "$(pr_url "$pr")"
+      [ "$DRY" = 1 ] || rm -f "$STATE/stamp/automerge-why-$n"
+      # it is merged: the rest of this round must not start a fix run for it
+      jq --argjson p "$pr" 'map(select(.pr != $p))' "$PRS_JSON" >"$PRS_JSON.t" && mv "$PRS_JSON.t" "$PRS_JSON"
+    else
+      log "#$n: could not merge PR #$pr automatically; trying again in the next round"
+    fi
+  done 3< <(jq -c '.[]' "$PRS_JSON")
+}
+
 # --- 2. Fix ---
 phase_fix() {
   local p n reasons sig
@@ -325,6 +385,7 @@ do_tick() {
   phase_resume
   phase_base_check
   phase_digest
+  phase_automerge
   if paused; then
     log "Paused by a usage limit until $(fmt_epoch "$(paused_until)"); not starting agents (resume now: agent-loop unpause)"
     return 0
