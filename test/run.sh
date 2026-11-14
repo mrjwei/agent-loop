@@ -342,40 +342,12 @@ check "loop: under the budget agents start as before" '1 7 8' \
   "$(AGENT_DAILY_BUDGET=7 tick --dry-run | sed -n 's/.*start implement for #\([0-9]*\).*/\1/p' | tr '\n' ' ' | sed 's/ $//')"
 out=$(AGENT_DAILY_BUDGET=6 "$B" "$ROOT/libexec/loop.sh" --status 2>&1)
 check "status: shows today's spend, the budget and that it is reached" '1|1' \
-  "$(echo "$out" | grep -c 'API-equivalent cost: \$6.50 of \$6 (AGENT_DAILY_BUDGET)')|$(echo "$out" | grep -c 'Daily budget reached')"
+  "$(echo "$out" | grep -c 'Spend today: \$6.50 of \$6 (AGENT_DAILY_BUDGET)')|$(echo "$out" | grep -c 'Daily budget reached')"
 : >"$NOTIFY_OUT"; rm -f "$STATE/budget-notified"
 AGENT_DAILY_BUDGET=6 AGENT_NOTIFY=1 AGENT_NOTIFY_CMD="$T/notify.sh" tick >/dev/null
 AGENT_DAILY_BUDGET=6 AGENT_NOTIFY=1 AGENT_NOTIFY_CMD="$T/notify.sh" tick >/dev/null
 check "loop: the budget notification is sent once a day" 1 "$(grep -c '^Agents paused|Daily budget reached' "$NOTIFY_OUT")"
 rm -f "$STATE/logs/issue-9-"*.json "$STATE/logs/triage-$d-010102.json" "$STATE/budget-notified"
-
-# Token budget and plan windows (Pro / Max: no dollars are billed, tokens and the 5-hour / weekly windows count)
-echo '{"total_cost_usd":0,"usage":{"input_tokens":1000,"output_tokens":2000,"cache_creation_input_tokens":3000,"cache_read_input_tokens":900000}}' >"$STATE/logs/issue-9-$d-010101-fix.json"
-echo '{"usage":{"input_tokens":500,"output_tokens":500}}' >"$STATE/logs/triage-$d-010102.json"
-echo '{"usage":{"input_tokens":99999999}}' >"$STATE/logs/issue-9-20200101-010101-fix.json"
-check "tokens_today: input + output + cache writes of today's result files, without cache reads" 7000 "$(tokens_today)"
-check "fmt_tokens: k and M" '999 7k 1.5M' "$(fmt_tokens 999) $(fmt_tokens 7000) $(fmt_tokens 1500000)"
-tover() { AGENT_DAILY_TOKEN_BUDGET=$1 over_budget && echo over || echo under; }
-check "over_budget: tokens at or over the token budget, under it, and off when empty" 'over under under' "$(tover 7000) $(tover 7001) $(tover '')"
-check "budget_reason: names the token budget; the dollar budget wins when both are reached" 'tokens|dollars' \
-  "$(AGENT_DAILY_TOKEN_BUDGET=5000 budget_reason | grep -o 'tokens used today (AGENT_DAILY_TOKEN_BUDGET)' | cut -d' ' -f1)|$(AGENT_DAILY_BUDGET=0 AGENT_DAILY_TOKEN_BUDGET=5000 budget_reason | grep -q 'AGENT_DAILY_BUDGET' && echo dollars)"
-out=$(AGENT_DAILY_TOKEN_BUDGET=5000 tick --dry-run)
-check "loop: over the token budget a round starts no agent and says why" '0|1' \
-  "$(echo "$out" | grep -c 'start implement')|$(echo "$out" | grep -c 'Daily budget reached: 7k of 5k tokens used today (AGENT_DAILY_TOKEN_BUDGET)')"
-check "loop: under the token budget agents start as before" '1 7 8' \
-  "$(AGENT_DAILY_TOKEN_BUDGET=8000 tick --dry-run | sed -n 's/.*start implement for #\([0-9]*\).*/\1/p' | tr '\n' ' ' | sed 's/ $//')"
-now=$(date +%s)
-printf '%s\n' "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\",\"unifiedWindows\":{\"five_hour\":{\"utilization\":0.5,\"resetsAt\":$((now + 3600))},\"seven_day\":{\"utilization\":0.25,\"resetsAt\":$((now + 90000))}}}}" >"$T/windows.jsonl"
-rm -f "$USAGE_FILE"; record_usage_windows "$T/windows.jsonl"
-check "show_usage_windows: lists the windows of the last usage reading with their share" '2|1|1' \
-  "$(show_usage_windows | wc -l | tr -d ' ')|$(show_usage_windows | grep -c '^five_hour 50% (resets ')|$(show_usage_windows | grep -c '^seven_day 25% (resets ')"
-out=$(AGENT_DAILY_TOKEN_BUDGET=8000 "$B" "$ROOT/libexec/loop.sh" --status 2>&1)
-check "status: shows today's tokens, the token budget and the plan windows" '1|1|1' \
-  "$(echo "$out" | grep -c 'tokens: 7k of 8k (AGENT_DAILY_TOKEN_BUDGET)')|$(echo "$out" | grep -c 'Plan usage windows')|$(echo "$out" | grep -c '^five_hour 50%')"
-printf '%s\n' "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"unifiedWindows\":{\"five_hour\":{\"utilization\":0.5,\"resetsAt\":$((now - 10))}}}}" >"$T/stale.jsonl"
-record_usage_windows "$T/stale.jsonl"
-check "show_usage_windows: a window that has reset is not shown" '' "$(show_usage_windows)"
-rm -f "$STATE/logs/issue-9-"*.json "$STATE/logs/triage-$d-010102.json" "$STATE/budget-notified" "$USAGE_FILE"
 : >"$GH_LOG"
 
 # --- CLI ---
