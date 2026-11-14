@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # Set up the current project for agent-loop, or check the tools it needs.
-#   agent-loop init [--force] [--hook] [--no-labels] [--no-workflow] [--dry-run]
+#   agent-loop init [--force] [--hook] [--plan] [--no-labels] [--no-workflow] [--dry-run]
 #   agent-loop doctor      (init.sh --check)
 #   agent-loop labels      (init.sh --labels-only)
 set -euo pipefail
 . "$(dirname "$0")/../lib/common.sh"
 
-mode=init force=0 hook=0 labels=1 workflow=1
+mode=init force=0 hook=0 labels=1 workflow=1 plan=0
 for a in "$@"; do
   case "$a" in
     --force) force=1 ;;
     --hook) hook=1 ;;
     --no-hook) hook=0 ;;   # the default since the loop passes its own hook; kept for old scripts
+    --plan) plan=1 ;;
     --no-labels) labels=0 ;;
     --no-workflow) workflow=0 ;;
     --dry-run) DRY=1 ;;
@@ -160,6 +161,10 @@ render "$PKG_DIR/templates/agent-loop.conf" | put "$REPO/.agent-loop.conf"
 put "$PROMPTS_DIR/project.md" <"$PKG_DIR/templates/project.md"
 [ "$hook" = 1 ] && install_hook
 [ "$workflow" = 1 ] && install_review_workflow
+# The plan template. `status: template` keeps triage and plan-lint from reading the example items as a plan.
+if [ "$plan" = 1 ]; then
+  sed 's/^status: active$/status: template/' "$PKG_DIR/templates/plan.md" | put "$REPO/docs/plans/TEMPLATE.md"
+fi
 if [ "$labels" = 1 ]; then
   ensure_labels || log "could not create labels (is gh authenticated, and does the repo have a GitHub remote?)"
 fi
@@ -174,3 +179,9 @@ Done. Next steps:
   4. Try it without changes or cost:   agent-loop start --once --dry-run --no-triage
   5. Label one small issue 'agent-ok' and run:   agent-loop start --no-triage
 EOF
+if [ "$plan" = 1 ]; then
+  cat <<'EOF'
+
+The plan template is docs/plans/TEMPLATE.md. Copy it to docs/plans/<name>.md for a real plan and check it with: agent-loop plan-lint
+EOF
+fi
