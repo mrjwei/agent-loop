@@ -45,7 +45,8 @@ AGENT_MAX_FIXES=${AGENT_MAX_FIXES:-3}                     # fix rounds per PR be
 AGENT_MAX_TURNS=${AGENT_MAX_TURNS:-150}
 AGENT_RUN_TIMEOUT=${AGENT_RUN_TIMEOUT:-3600}              # seconds one implement / fix run may take (0 = no limit)
 AGENT_MAX_COST_PER_RUN=${AGENT_MAX_COST_PER_RUN:-}        # API-equivalent dollars per run, via the claude CLI's own cap (empty = off)
-AGENT_DAILY_BUDGET=${AGENT_DAILY_BUDGET:-}                # API-equivalent dollars per local day; over it, no agent starts (empty = off)
+AGENT_DAILY_BUDGET=${AGENT_DAILY_BUDGET:-}                # API-equivalent dollars per local day; over it, no agent starts (empty = off; for API-key use)
+AGENT_DAILY_TOKEN_BUDGET=${AGENT_DAILY_TOKEN_BUDGET:-}    # tokens (input + output + cache writes) per local day; over it, no agent starts (empty = off; for Pro / Max use)
 AGENT_TRIAGE_MAX_TURNS=${AGENT_TRIAGE_MAX_TURNS:-80}
 AGENT_TRIAGE_MAX_ACTIONS=${AGENT_TRIAGE_MAX_ACTIONS:-15}  # triage changes applied per run
 AGENT_VERIFY_TIMEOUT=${AGENT_VERIFY_TIMEOUT:-600}         # seconds the Stop hook may spend on AGENT_VERIFY_CMD
@@ -341,20 +342,39 @@ cc $cc}"
   notify "Agent stopped (#$1)" "$2" "$(issue_url "$1")"
 }
 
-# --- Spend (from the result files in the logs; no model call) ---
-# API-equivalent dollars spent so far today (local day): the total_cost_usd of every result file written today.
+# --- Spend and tokens (from the result files in the logs; no model call) ---
 # Result files are logs/issue-<n>-<YYYYMMDD>-<HHMMSS>-<mode>.json and logs/triage-<YYYYMMDD>-<HHMMSS>.json.
-spend_today() {
+# Sum a jq expression over every result file written today (local day)
+sum_today() { # jq-expression
   local d f; d=$(date +%Y%m%d)
   for f in "$STATE"/logs/*-"$d"-*.json; do
-    [ -f "$f" ] && { jq -r '.total_cost_usd // 0' "$f" 2>/dev/null || true; }
+    [ -f "$f" ] && { jq -r "$1" "$f" 2>/dev/null || true; }
   done | awk '{ s += $1 } END { printf "%.2f", s + 0 }'
 }
-# Is today's spend at or over AGENT_DAILY_BUDGET? (never when the budget is empty)
-over_budget() {
-  [ -n "$AGENT_DAILY_BUDGET" ] || return 1
-  awk -v a="$(spend_today)" -v b="$AGENT_DAILY_BUDGET" 'BEGIN { exit !(a + 0 >= b + 0) }'
+# API-equivalent dollars spent so far today. On a Pro / Max plan nothing is billed per call: see tokens_today and the plan windows
+spend_today() { sum_today '.total_cost_usd // 0'; }
+# Tokens used so far today: input + output + cache writes (cache reads are left out: they are cheap and would swamp the sum)
+tokens_today() {
+  sum_today '(.usage // {}) | (.input_tokens // 0) + (.output_tokens // 0) + (.cache_creation_input_tokens // 0)' | awk '{ printf "%.0f", $1 }'
 }
+fmt_tokens() { awk -v t="$1" 'BEGIN { if (t >= 1e6) printf "%.1fM", t / 1e6; else if (t >= 1e3) printf "%.0fk", t / 1e3; else printf "%d", t }'; }
+# Why no agent may start today: today's spend reached AGENT_DAILY_BUDGET, or today's tokens reached AGENT_DAILY_TOKEN_BUDGET.
+# Prints the reason; prints nothing when both are empty or not reached.
+budget_reason() {
+  local spent tokens
+  if [ -n "$AGENT_DAILY_BUDGET" ]; then
+    spent=$(spend_today)
+    awk -v a="$spent" -v b="$AGENT_DAILY_BUDGET" 'BEGIN { exit !(a + 0 >= b + 0) }' &&
+      { echo "\$${spent} of \$${AGENT_DAILY_BUDGET} spent today (AGENT_DAILY_BUDGET)"; return 0; }
+  fi
+  if [ -n "$AGENT_DAILY_TOKEN_BUDGET" ]; then
+    tokens=$(tokens_today)
+    awk -v a="$tokens" -v b="$AGENT_DAILY_TOKEN_BUDGET" 'BEGIN { exit !(a + 0 >= b + 0) }' &&
+      { echo "$(fmt_tokens "$tokens") of $(fmt_tokens "$AGENT_DAILY_TOKEN_BUDGET") tokens used today (AGENT_DAILY_TOKEN_BUDGET)"; return 0; }
+  fi
+  return 0
+}
+over_budget() { [ -n "$(budget_reason)" ]; }
 
 # Does the installed claude CLI have a spend cap option (--max-budget-usd)? The CLI stops at the first unknown option,
 # before doing anything: if that is the deliberately bogus last one, the option before it is supported.
@@ -437,9 +457,29 @@ pause_until() { # epoch [reason] (only ever extends the current pause)
   notify "Agents paused" "${why}. Resuming at $(fmt_epoch "$1")"
 }
 
+# The plan windows (five_hour, seven_day, ...) of the last usage reading in a recording, kept for `agent-loop status`
+USAGE_FILE="$STATE/usage-windows.json"
+record_usage_windows() { # stream.jsonl
+  local w
+  w=$(jq -Rnc '[inputs | fromjson? | select(.type == "rate_limit_event") | .rate_limit_info.unifiedWindows // empty] | last // empty' "$1" 2>/dev/null) || return 0
+  [ -n "$w" ] || return 0
+  jq -nc --argjson w "$w" '{windows: $w}' >"$USAGE_FILE" || true
+}
+# One line per plan window that has not reset yet: "five_hour 62% (resets 11/14 18:00)"
+show_usage_windows() {
+  [ -f "$USAGE_FILE" ] || return 0
+  local name pct reset
+  jq -r --argjson now "$(date +%s)" '.windows | to_entries[]
+    | select((.value.resetsAt | type) == "number")
+    | (.value.resetsAt | if . > 1e12 then . / 1000 else . end | floor) as $r | select($r > $now)
+    | "\(.key) \((.value.utilization // 0) * 100 | floor)% \($r)"' "$USAGE_FILE" 2>/dev/null |
+  while read -r name pct reset; do echo "$name $pct (resets $(fmt_epoch "$reset"))"; done
+}
+
 # If the last usage reading in a recording is over AGENT_PAUSE_AT_UTILIZATION, pause until that window resets
 pause_if_heavy_usage() { # stream.jsonl
   local w
+  record_usage_windows "$1"
   w=$(jq -Rnr --argjson t "$AGENT_PAUSE_AT_UTILIZATION" '
     [inputs | fromjson? | select(.type == "rate_limit_event") | .rate_limit_info] | last // empty
     | [.unifiedWindows // {} | to_entries[] | select((.value.utilization // 0) >= $t and (.value.resetsAt | type) == "number")]
