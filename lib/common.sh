@@ -253,7 +253,11 @@ snapshot_normalize() {
              blockedBy: [.blockedBy.nodes[] | select(.state == "OPEN") | .number],
              # a "Depends on: #12, #13" line in the body also counts as a dependency (the Japanese "依存:" is accepted too)
              bodyDeps: [(.body // "") | split("\n")[] | select(test("^\\s*(依存|Depends on|Blocked by)\\s*[:：]"; "i"))
-                        | scan("#([0-9]+)") | .[0] | tonumber]})'
+                        | scan("#([0-9]+)") | .[0] | tonumber],
+             # a "Touches: src/billing/**, docs/api.md" line: globs of the files the issue changes (backticks are dropped)
+             touches: [(.body // "") | split("\n")[] | select(test("^\\s*Touches\\s*[:：]"; "i"))
+                       | sub("^\\s*Touches\\s*[:：]"; "") | gsub("`"; "") | split(",")[]
+                       | gsub("^\\s+|\\s+$"; "") | select(. != "")]})'
 }
 
 # Issues an agent can start, lowest number first: agent-ok, not human/blocked, not a parent, all dependencies closed
@@ -265,6 +269,35 @@ ready_issues() { # snapshot.json
     | select((.blockedBy | length) == 0)
     | select([.bodyDeps[] as $d | $open | index($d)] | all(. == null))
     | .number' "$1"
+}
+
+# --- Touches: do two sets of files overlap? ---
+# A pattern may use * ? [ ] (a * also matches a /, so ** works as expected); a trailing / means everything below it.
+# The check is conservative: when in doubt two patterns overlap, so that an issue waits rather than conflicts.
+glob_norm() { # pattern
+  local g=${1#./}
+  case "$g" in */) g="$g**" ;; esac
+  printf '%s' "$g"
+}
+glob_literal_dir() { # pattern -> the directory part before the first wildcard (empty when it starts with one)
+  local p=${1%%[*?[]*}
+  printf '%s' "${p%"${p##*/}"}"
+}
+globs_overlap() { # a b: could one path match both?
+  local a b pa pb
+  a=$(glob_norm "$1") b=$(glob_norm "$2")
+  case "$a" in *[*?[]*) pa=1 ;; *) pa=0 ;; esac
+  case "$b" in *[*?[]*) pb=1 ;; *) pb=0 ;; esac
+  # shellcheck disable=SC2254  # the pattern is the point
+  if [ "$pa$pb" = 00 ]; then [ "$a" = "$b" ]; return; fi
+  # shellcheck disable=SC2254
+  if [ "$pa" = 0 ]; then case "$a" in $b) return 0 ;; *) return 1 ;; esac; fi
+  # shellcheck disable=SC2254
+  if [ "$pb" = 0 ]; then case "$b" in $a) return 0 ;; *) return 1 ;; esac; fi
+  pa=$(glob_literal_dir "$a") pb=$(glob_literal_dir "$b")
+  case "$pa" in "$pb"*) return 0 ;; esac
+  case "$pb" in "$pa"*) return 0 ;; esac
+  return 1
 }
 
 has_label() { # snapshot.json issue label
