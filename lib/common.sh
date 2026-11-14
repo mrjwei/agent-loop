@@ -35,6 +35,8 @@ AGENT_LOOP_VERSION=$(cat "$PKG_DIR/VERSION" 2>/dev/null || echo dev)
 
 AGENT_MODEL=${AGENT_MODEL:-claude-sonnet-5-5}             # implement / fix agent
 AGENT_EFFORT=${AGENT_EFFORT:-high}
+AGENT_ESCALATE_MODEL=${AGENT_ESCALATE_MODEL:-}            # model for the last implement attempt and the last fix round (empty = AGENT_MODEL)
+AGENT_ESCALATE_EFFORT=${AGENT_ESCALATE_EFFORT:-}          # effort for those runs (empty = AGENT_EFFORT)
 AGENT_TRIAGE_MODEL=${AGENT_TRIAGE_MODEL:-claude-opus-5-5} # planning (triage) agent
 AGENT_TRIAGE_EFFORT=${AGENT_TRIAGE_EFFORT:-high}
 AGENT_PERMISSION_MODE=${AGENT_PERMISSION_MODE:-auto}      # auto: a classifier decides commands not on the allow list; denies always apply
@@ -445,6 +447,25 @@ render_prompt() { # name
   [ -n "$(echo "$T_PROJECT" | tr -d '[:space:]')" ] || T_PROJECT="(none)"
   export T_BASE T_LANGUAGE T_TRUSTED T_VERIFY T_PROJECT
   render "$(prompt_file "$1")"
+}
+
+# --- The previous run of an issue, for the next attempt ---
+# What the previous implement / fix run of an issue ended with, as text for the next prompt (nothing when there is no
+# earlier run). Reads the run's result file and the .end note work.sh wrote next to it. The agent wrote the summary and
+# the reason itself: it is a lead to check against the worktree, not a fact.
+previous_run_note() { # issue implement|fix
+  local f out end summary reason
+  f=$(ls "$STATE"/logs/issue-"$1"-*-"$2".jsonl 2>/dev/null | sort | tail -1) || true
+  [ -n "$f" ] || return 0
+  out="${f%.jsonl}.json"
+  end=$(cat "${f%.jsonl}.end" 2>/dev/null || true)
+  summary=$(jq -r '.structured_output.summary // .result // empty' "$out" 2>/dev/null || true)
+  reason=$(jq -r '.structured_output.blocked_reason // empty' "$out" 2>/dev/null || true)
+  [ -n "$end$summary$reason" ] || return 0
+  printf 'About the previous run (it did not finish the job, so do not repeat what it did that failed; check its claims against the worktree):\n'
+  [ -z "$end" ] || printf -- '- How it ended: %s\n' "$end"
+  [ -z "$summary" ] || printf -- '- Its summary: %s\n' "$summary"
+  [ -z "$reason" ] || printf -- '- Its blocked_reason: %s\n' "$reason"
 }
 
 # --- Usage limits (subscription 5-hour / weekly windows, API 429, overload 529) ---

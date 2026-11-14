@@ -81,6 +81,8 @@ While a usage limit is in effect (a rejected usage window, API 429, or overload 
 
 Agents run as `claude -p`, so they bill like any headless Claude Code use: against your API key, or on a subscription against what your plan gives headless use (Anthropic moved `claude -p` on Pro/Max to a separate monthly Agent SDK credit from 2026-06-15; check your plan). The `$` figures in the logs are API-equivalent estimates.
 
+Every attempt after the first starts with what the previous run left behind: its summary, its `blocked_reason`, and how it ended (turn limit, timeout, checks still failing, usage limit), read from its result file in the logs. The line that starts a run in the log names the model it actually uses.
+
 Outcomes are judged by GitHub's real state (is a PR open?), not by what the agent claims. Implementation stops after 2 attempts and fixing after 3 rounds, each ending in `agent-blocked` plus a notification. Agents run in their own process group, so Ctrl-C on the loop leaves them running and `agent-loop kill` stops them completely.
 
 ### Notifications
@@ -127,6 +129,7 @@ Three events need a person: an agent stopped (`agent-blocked`), a PR was opened,
 | `AGENT_PLANS_ACTIVE_REGEX` | `^status: active` | A plan counts as active when a line matches (empty = all) |
 | `AGENT_AUTOCREATE_LABELS` | empty | Globs of labels triage may create, e.g. `phase:*` |
 | `AGENT_MODEL` / `AGENT_EFFORT` | `claude-sonnet-5-5` / `high` | Implement and fix agents |
+| `AGENT_ESCALATE_MODEL` / `AGENT_ESCALATE_EFFORT` | empty (off) | Model and effort for the last implement attempt (`AGENT_MAX_ATTEMPTS`) and the last fix round (`AGENT_MAX_FIXES`), instead of `AGENT_MODEL` / `AGENT_EFFORT`. Each one falls back to the normal value when empty. No extra run: the same number of attempts happens, the last with the stronger model |
 | `AGENT_TRIAGE_MODEL` / `AGENT_TRIAGE_EFFORT` | `claude-opus-5-5` / `high` | Triage agent |
 | `AGENT_PERMISSION_MODE` | `auto` | `acceptEdits` is stricter: anything not on the allow list is refused |
 | `AGENT_MAX_PARALLEL` | `2` | Agents at once |
@@ -185,6 +188,7 @@ Everything is under `.git/agent-loop/` (outside version control, shared by all w
 |---|---|
 | `logs/issue-<n>-<time>-<implement\|fix>.jsonl` | Full conversation (`stream-json`, including usage events) |
 | `logs/issue-<n>-<time>-<…>.json` | Final result: `session_id`, turns, approximate API-equivalent cost, `structured_output` |
+| `logs/issue-<n>-<time>-<…>.end` | One line on how the run ended, read by the next attempt's prompt |
 | `logs/issue-<n>-<time>-<…>.log` | `work.sh` output |
 | `logs/triage-<time>.json(l)`, `.applied.log`, `.issue-<n>.old-body.md` | Triage proposal, changes applied, previous issue bodies |
 | `base-failed-sha`, `base-last-green-sha` | The base commit an issue was opened for, and the last base commit seen passing |

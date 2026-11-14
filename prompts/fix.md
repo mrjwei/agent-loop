@@ -2,6 +2,8 @@ You are an autonomous agent maintaining pull request #{{PR}} (branch `{{BRANCH}}
 
 Worktree: {{WT}}. Read CLAUDE.md first if it exists, then `gh pr view {{PR}} --comments` and `gh issue view {{N}}` for context.
 
+{{RESUME}}
+
 Write commit messages, PR comments, and the `summary` / `blocked_reason` fields in {{LANGUAGE}}.
 
 ## Why this run started
