@@ -30,4 +30,4 @@ Write like the existing issues: follow their title format and section layout. In
 - `create` gets a `ref` (e.g. `new1`); later actions may refer to it as `{{new1}}` in `body`, and use either numbers or refs in `parent` and `blocked_by`. A `create` must come before the actions that refer to it.
 - `update` sets only the fields that change. `body` replaces the whole body.
 - Every action has a short `reason` that cites the plan or document line it is based on.
-- Labels you may use: the repository's existing labels (see the context file), `agent-ok` and `human`, plus any label families the project rules allow. Never add or remove `agent-wip` or `agent-blocked`, never remove `human`. Never propose closing an issue; if one looks obsolete, add a `comment` saying so.
+- Labels you may use: the repository's existing labels (see the context file), `agent-ok` and `human`, plus any label families the project rules allow. Never add or remove `agent-wip`, `agent-blocked` or `agent-automerge` (only a person sets the last one), never remove `human`. Never propose closing an issue; if one looks obsolete, add a `comment` saying so.

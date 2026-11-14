@@ -42,7 +42,7 @@ agent-loop init        # writes .agent-loop.conf, .agent-loop/prompts/project.md
 | Config | `.agent-loop.conf`, with setup and verify commands guessed from `package.json`, `go.mod`, `Cargo.toml` or a Makefile |
 | Project rules | `.agent-loop/prompts/project.md`, a stub for what an agent cannot guess from the code |
 | Stop hook (only with `--hook`) | `.claude/hooks/agent-loop-verify.sh`, merged into `.claude/settings.json`, for people's interactive sessions too. The loop does not need it: every agent run gets the same hook through `--settings`. |
-| Labels | `agent-ok`, `agent-wip`, `agent-blocked`, `human` (skip with `--no-labels`) |
+| Labels | `agent-ok`, `agent-wip`, `agent-blocked`, `human`, `agent-automerge` (skip with `--no-labels`) |
 
 Then:
 
@@ -63,7 +63,7 @@ agent-loop work <issue> [--fix]                        # run a single issue by h
 agent-loop triage [--dry-run]                          # sync issues with plan files
 agent-loop stats [--days N] [--json|--digest]          # outcomes, turns and cost of the finished runs (default 7 days); --digest: a short text for the last 24 hours
 agent-loop lessons [--days N]                          # why agents stopped and what reviewers asked for (default 30 days), newest first
-agent-loop labels                                      # (re)create the labels
+agent-loop labels                                      # (re)create the labels (including agent-automerge)
 agent-loop doctor                                      # check tools, claude CLI options, gh auth, base branch
 agent-loop version
 ```
@@ -75,6 +75,7 @@ agent-loop version
 | 1 | Clean up | For PRs merged, closed unmerged, or whose issue closed: remove the worktree `../<repo>-agent-<n>`, the local and remote branch, and the state. If the issue is still open (the PR was closed unmerged, or merged without closing the issue), it loses `agent-ok` once, with a comment saying why, so the same work does not start again. Logs older than 14 days are deleted. |
 | 1b | Resume | An open issue labeled `agent-blocked` whose last "Stopped working on this" comment from the loop was followed by a comment from a trusted author (`AGENT_TRUSTED_ASSOCIATIONS` / `AGENT_TRUSTED_USERS`) that does not start with `🤖 agent:` loses `agent-blocked`. It then follows the normal path: a new attempt, or a fix run when its PR is open. Comments from anyone else never resume an issue. `AGENT_AUTO_RESUME=0` turns this off. |
 | 1c | Base check | Reads the check status of the head commit of `origin/<base>`. If a check has failed (ignoring `AGENT_IGNORE_CHECKS`), step 4 starts no agent until the head passes again (cleanup, resume and fix go on), and the top of `agent-loop status` says so. Once per failing commit the loop opens an issue titled for the failing checks, listing the commit, the check names and the PRs merged since the last commit it saw pass, and sends one notification. The issue gets no `agent-ok`: you decide whether to revert or fix it by hand. Pending checks and a base branch without checks block nothing. No model call. |
+| 1d | Auto-merge | For an open agent PR whose issue you labeled `agent-automerge`, the loop merges it when every condition in "Auto-merge" below holds (`AGENT_AUTOMERGE=0` ignores the label). |
 | 2 | Fix | An open PR on branch `agent/issue-<n>` of this repository (a PR from a fork never counts) with a conflict, a failing check or new review feedback from a trusted author gets `work --fix`. Nothing runs if nothing changed since the last fix. After 3 rounds it becomes `agent-blocked`, and so does a PR whose fix run pushed nothing while the conflict or failing check remains (for example a flaky check: re-run it, then remove the label). |
 | 3 | Triage | When nothing is ready to start and the base branch moved since the last triage, run triage (only if `AGENT_PLANS_GLOB` is set). |
 | 4 | Start | Issues with `agent-ok`, without `human` / `agent-blocked`, with no sub-issues and all dependencies closed start in number order, up to `AGENT_MAX_PARALLEL`. Dependencies are GitHub's "blocked by" relations plus a `Depends on: #12, #13` line in the body. An issue with a `Touches:` line (below) is held back for the round while its files overlap a running issue's or an open agent PR's. |
@@ -88,6 +89,19 @@ Every attempt after the first starts with what the previous run left behind: its
 Passing checks prove the project's checks pass, not that the issue is done. So the implement prompt requires a `## Acceptance criteria` section in the PR body: one line per criterion of the issue, each with its evidence (the test that covers it, or the file and lines) or `not done` with the reason, and a PR with a `not done` line uses `Refs #<n>` instead of `Closes #<n>`. The fix prompt keeps the section up to date. After an implement run opens a PR, `work.sh` checks that the body has the section and, if not, comments once on the PR; it starts no extra run for it. There is no second review pass, so this costs no extra tokens (screenshots or browser evidence for UI work are out of scope).
 
 Outcomes are judged by GitHub's real state (is a PR open?), not by what the agent claims. Implementation stops after 2 attempts and fixing after 3 rounds, each ending in `agent-blocked` plus a notification. Agents run in their own process group, so Ctrl-C on the loop leaves them running and `agent-loop kill` stops them completely.
+
+### Auto-merge
+
+Every agent PR waits for you to merge it, and the issues that depend on it wait too. For low-risk work (documentation, tests, small well-specified changes) you add nothing but a click. Label such an issue `agent-automerge` and the loop merges its PR itself, in the round where all of these hold:
+
+- the issue has `agent-automerge` and neither `agent-blocked` nor `human`;
+- the PR is mergeable and **every check has finished and passed** (`SUCCESS`, `NEUTRAL` or `SKIPPED`; a PR with no checks is never merged automatically; `AGENT_IGNORE_CHECKS` does not apply here);
+- no feedback from a trusted author is waiting for a fix run, there is no conflict, and no agent run is in progress for the issue;
+- if `AGENT_AUTOMERGE_REQUIRE_REVIEW` names a login (for example an external review bot), that login's latest review or comment is clean in the sense of `AGENT_CLEAN_REVIEW_USER` (a "No issues found" comment) and is newer than the PR's last commit;
+- the PR body contains `Closes #<n>` (a PR that leaves part for a person, with `Refs #<n>`, is not merged);
+- the checks on the head of the base branch are not failing (see round step 1c).
+
+The merge uses `AGENT_AUTOMERGE_METHOD` (`squash` by default; `merge` or `rebase`), pinned to the head commit that was checked, and is announced with a comment on the PR and a notification. If a labeled PR is not merged, the log says why, once per reason. The loop makes the merge itself: `gh pr merge` stays denied to the agents, and the loop adds no review pass of its own, so this costs no tokens. A project that wants an independent review before merging supplies it outside the loop (a review bot, a required check) and names it in `AGENT_AUTOMERGE_REQUIRE_REVIEW`. Branch protection still applies: if GitHub refuses the merge, the loop logs it and tries again next round.
 
 ### Stats and the daily digest
 
@@ -130,6 +144,7 @@ The value is comma-separated globs (`*`, `?`, `[...]`; a `*` also matches `/`, s
 | `agent-wip` | An agent is working on it, or its PR awaits review | the loop |
 | `agent-blocked` | The agent stopped; the reason is in an issue comment | the loop. **Your answer in a comment is enough**: the next round removes it and work resumes (removing it by hand works too, and is needed with `AGENT_AUTO_RESUME=0`) |
 | `human` | Work only a person can do; `agent-ok` is never added | you, or triage |
+| `agent-automerge` | The loop merges this issue's PR itself once every condition in "Auto-merge" holds | **you only**. Triage never adds or removes it, and the agents cannot change labels |
 
 ### What you do
 
@@ -172,6 +187,9 @@ The value is comma-separated globs (`*`, `?`, `[...]`; a `*` also matches `/`, s
 | `AGENT_CLEAN_REVIEW_USER` | `claude[bot]` | A "No issues found" comment from this user is not feedback |
 | `AGENT_TRUSTED_ASSOCIATIONS` | `OWNER MEMBER COLLABORATOR` | GitHub author associations whose comments count as feedback and whose issues triage may give `agent-ok` (`*` = everyone) |
 | `AGENT_TRUSTED_USERS` | the value of `AGENT_CLEAN_REVIEW_USER` | Logins trusted whatever their association (review bots) |
+| `AGENT_AUTOMERGE` | `1` | `0` ignores the `agent-automerge` label everywhere |
+| `AGENT_AUTOMERGE_METHOD` | `squash` | `squash`, `merge` or `rebase` |
+| `AGENT_AUTOMERGE_REQUIRE_REVIEW` | empty | A login (e.g. a review bot) whose latest review or comment on the PR must be clean before the loop merges |
 | `AGENT_NOTIFY` | `1` | `0` turns off every notification: the `@mention` comments and `AGENT_NOTIFY_CMD` |
 | `AGENT_NOTIFY_USER` | empty (`init` fills in your GitHub login) | GitHub login mentioned in the loop's comments on blocked issues and opened PRs |
 | `AGENT_NOTIFY_CMD` | empty | Command run with the title and body as arguments and the issue or PR URL in `$AGENT_NOTIFY_URL` |
@@ -197,6 +215,7 @@ The agents get three prompts: `implement`, `fix` and `triage` (in `prompts/`). T
 These are best-effort defenses, **not a sandbox**: the agents run with your own permissions.
 
 - **Whose words count**: text on GitHub becomes instructions to an agent, so the people who can write it are the trust boundary. Only comments from trusted authors (`AGENT_TRUSTED_ASSOCIATIONS`, by default the owner, organization members and collaborators, plus `AGENT_TRUSTED_USERS`) start a fix run or reach the fix prompt. Triage never adds `agent-ok` to an issue someone else opened; label it yourself after reading it. The agents still read whole issue and PR threads with `gh`, and the prompts tell them to treat other people's comments as information only, which is a weaker defense: on a public repository, read a thread before you label its issue `agent-ok`.
+- **Who can cause a merge**: only the loop merges, and only the PR of an issue that carries `agent-automerge`. That label is set by whoever can label issues in the repository (people with triage or write access); triage never adds it and the agents cannot change labels. Comments, even from trusted authors, never merge anything. The conditions under "Auto-merge" must all hold, and branch protection still applies. If you do not want the loop to merge at all, set `AGENT_AUTOMERGE=0`.
 - **Denied commands** (built in): `gh pr merge`, closing PRs or issues, label changes, `gh api`, `gh auth`, `gh repo/secret/variable/workflow/release`, force-push (including `+refspec`), pushing to the base branch, `git rebase`, `git reset --hard`, `git worktree`. Patterns also match in the middle of a command line. Your project's deploy and production commands are **yours to add** in `AGENT_EXTRA_DENY`.
 - **Credentials**: the variables in `AGENT_SCRUB_ENV` are removed for the agents and for `AGENT_SETUP_CMD` (an install runs scripts from the worktree); `~/.aws`, `~/.ssh`, `~/.config/gh` and the macOS keychain are denied to the Read tool and to shell commands that name them. Of the main checkout's `.env` files, the Read tool is denied `.env`, `.env.local`, `.env.production` and `.env.*.local`; shell commands are denied when they name `.env.local` or `.env.production`, or any `.env*` file by the main checkout's absolute path. A shell command that reaches a plain `.env` through a relative path matches no rule and is left to the permission classifier, so keep production keys out of the main checkout where you can.
 - **MCP**: `--strict-mcp-config` means no MCP servers or claude.ai connectors are loaded.

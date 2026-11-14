@@ -29,7 +29,7 @@ Usage: agent-loop <command> [options]     (run inside the target project's git c
   stats [--days N] [--json|--digest]
                           outcomes, turns and cost of the finished runs (default 7 days); --digest is the daily text
   lessons [--days N]      why agents stopped and what reviewers asked for (default: 30 days), to turn into project rules
-  labels                  create the agent-ok / agent-wip / agent-blocked / human labels
+  labels                  create the agent-ok / agent-wip / agent-blocked / human / agent-automerge labels
   version                 print the version
 
 Configuration lives in .agent-loop.conf at the project root. See the README.

@@ -53,6 +53,9 @@ AGENT_TRIAGE_MAX_ACTIONS=${AGENT_TRIAGE_MAX_ACTIONS:-15}  # triage changes appli
 AGENT_VERIFY_TIMEOUT=${AGENT_VERIFY_TIMEOUT:-600}         # seconds the Stop hook may spend on AGENT_VERIFY_CMD
 AGENT_IGNORE_CHECKS=${AGENT_IGNORE_CHECKS:-}              # comma-separated check names that never trigger a fix run
 AGENT_AUTO_RESUME=${AGENT_AUTO_RESUME:-1}                 # a trusted author's answer on an agent-blocked issue removes the label (0 = a person removes it)
+AGENT_AUTOMERGE=${AGENT_AUTOMERGE:-1}                     # 0 ignores the agent-automerge label everywhere
+AGENT_AUTOMERGE_METHOD=${AGENT_AUTOMERGE_METHOD:-squash}  # squash | merge | rebase
+AGENT_AUTOMERGE_REQUIRE_REVIEW=${AGENT_AUTOMERGE_REQUIRE_REVIEW:-} # login whose latest review/comment must be clean before the loop merges (e.g. a review bot)
 AGENT_NOTIFY=${AGENT_NOTIFY:-1}                           # 0 turns off every notification (the @mention comments and AGENT_NOTIFY_CMD)
 AGENT_NOTIFY_USER=${AGENT_NOTIFY_USER:-}                  # GitHub login mentioned in the loop's comments on blocked issues and opened PRs
 AGENT_NOTIFY_CMD=${AGENT_NOTIFY_CMD:-}                    # command run with the title and body as arguments (ntfy, Pushover, a Slack webhook, ...)
@@ -97,6 +100,7 @@ JQ_TRUSTED='def trusted($u; $a):
 
 AGENT_MARKER='🤖 agent:'   # comments that start with this are the agent's own and never count as "new feedback"
 L_OK=agent-ok L_WIP=agent-wip L_BLOCKED=agent-blocked L_HUMAN=human
+L_AUTOMERGE=agent-automerge   # set only by a person; the loop merges the PR of such an issue when every condition holds
 
 mkdir -p "$STATE/running" "$STATE/count" "$STATE/stamp" "$STATE/logs"
 
@@ -219,7 +223,8 @@ ensure_labels() {
   have=$(gh label list --limit 200 --json name -q '.[].name')
   for l in "$L_OK:07a540:An agent may work on this" "$L_WIP:fbca04:An agent is working on this, or its PR awaits review" \
     "$L_BLOCKED:b60205:The agent stopped and needs a human decision (answer in a comment; the loop removes this label, or remove it yourself)" \
-    "$L_HUMAN:0e8a16:Work only a person can do (agent-ok is never added)"; do
+    "$L_HUMAN:0e8a16:Work only a person can do (agent-ok is never added)" \
+    "$L_AUTOMERGE:5319e7:Set by a person only: the loop merges this issue's PR itself once every condition holds"; do
     echo "$have" | grep -qx "${l%%:*}" && continue
     run gh label create "${l%%:*}" --color "$(echo "$l" | cut -d: -f2)" --description "${l#*:*:}" >/dev/null
   done
@@ -376,6 +381,20 @@ base_merged_prs() { # last_green_sha head_sha
   else commits=$2; fi
   gh pr list --state merged --base "$AGENT_BASE_BRANCH" --limit 50 --json number,title,mergeCommit 2>/dev/null |
     jq -r --arg c "$commits" '($c | split("\n")) as $cs | .[] | select(.mergeCommit.oid as $o | $cs | index($o)) | "- #\(.number) \(.title)"' || true
+}
+
+# Is the latest review or comment of a login on a PR clean, i.e. a "No issues found" like AGENT_CLEAN_REVIEW_USER's, and
+# newer than the PR's head commit? (A review that predates the latest commit does not cover the code that would be merged.)
+review_is_clean() { # pr head_sha login
+  local r date
+  r=$(gh_repo)
+  date=$(gh api "repos/$r/commits/$2" --jq .commit.committer.date 2>/dev/null) && [ -n "$date" ] || return 1
+  {
+    gh api --paginate "repos/$r/issues/$1/comments" --jq '.[] | {u: .user.login, t: .created_at, b: (.body // "")}'
+    gh api --paginate "repos/$r/pulls/$1/comments" --jq '.[] | {u: .user.login, t: .created_at, b: (.body // "")}'
+    gh api --paginate "repos/$r/pulls/$1/reviews" --jq '.[] | {u: .user.login, t: .submitted_at, b: (.body // "")}'
+  } | jq -s -e --arg u "$3" --arg d "$date" '[.[] | select(.u == $u)] | sort_by(.t) | last
+      | select(. != null) | select(.t >= $d) | select(.b | test("No issues found"))' >/dev/null
 }
 
 # Why a PR needs a fix run (JSON). Takes one agent_prs entry and the time to read feedback from
