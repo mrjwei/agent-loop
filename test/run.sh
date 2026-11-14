@@ -415,7 +415,7 @@ case "$body" in
   *) ng "loop: the issue names the commit, the failing checks and the PRs merged since the last passing commit" "$body" ;;
 esac
 case "$body" in *"- #8 Old"*) ng "loop: PRs outside the range are not listed" ;; *) ok "loop: PRs outside the range are not listed" ;; esac
-case "$body" in *"$L_OK"*"label this issue"*) ng "loop: the issue never gets agent-ok" ;; *) ok "loop: the issue never gets agent-ok" ;; esac
+case "$body" in *"label this issue"*|*"hand it to an agent"*) ng "loop: the issue does not offer agent-ok" ;; *) ok "loop: the issue does not offer agent-ok" ;; esac
 check "loop: the issue is created without labels" 0 "$(grep '^issue create ' "$GH_LOG" | grep -c -e '--label')"
 runs '[{"name":"test","status":"in_progress","conclusion":null},{"name":"lint","status":"completed","conclusion":"failure"}]'
 rm -f "$STATE/base-failed-sha"

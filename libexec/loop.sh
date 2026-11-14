@@ -179,7 +179,7 @@ phase_base_check() {
 - Commit: $sha
 - Failing checks: $(echo "$fail" | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g')
 
-No agent starts until the checks on \`$AGENT_BASE_BRANCH\` pass again (fix runs and cleanup continue). Revert, fix it by hand, or label this issue \`$L_OK\` to hand it to an agent; the loop resumes by itself when the head passes.
+No agent starts until the checks on \`$AGENT_BASE_BRANCH\` pass again (fix runs and cleanup continue). Revert or fix it by hand; the loop resumes by itself when the head passes.
 
 $(if [ -n "$green" ]; then echo "Pull requests merged since the last commit that passed (${green:0:7}):"; else echo "The last commit that passed is not known. Pull requests merged with the head commit:"; fi)
 ${merged:-- none found}${cc:+
