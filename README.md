@@ -42,6 +42,7 @@ agent-loop init        # writes .agent-loop.conf, .agent-loop/prompts/project.md
 | Config | `.agent-loop.conf`, with setup and verify commands guessed from `package.json`, `go.mod`, `Cargo.toml` or a Makefile |
 | Project rules | `.agent-loop/prompts/project.md`, a stub for what an agent cannot guess from the code |
 | Stop hook (only with `--hook`) | `.claude/hooks/agent-loop-verify.sh`, merged into `.claude/settings.json`, for people's interactive sessions too. The loop does not need it: every agent run gets the same hook through `--settings`. |
+| Review workflow | `.github/workflows/claude-code-review.yml` with `allowed_bots: 'claude'`, because PRs the loop opens run as the `claude[bot]` actor and the action otherwise fails with "Workflow initiated by non-human actor". A workflow that already exists (for example from `/install-github-app`) is kept, and gets the line if it lacks it. Skip with `--no-workflow`. |
 | Labels | `agent-ok`, `agent-wip`, `agent-blocked`, `human`, `agent-automerge` (skip with `--no-labels`) |
 
 Then:
@@ -267,7 +268,7 @@ bin/agent-loop        entry point (dispatches to libexec/)
 libexec/              loop.sh  work.sh  triage.sh  init.sh  verify-hook.sh (the Stop hook)
 lib/common.sh         configuration, GitHub helpers, usage-limit handling
 prompts/              default implement / fix / triage prompts
-templates/            files `init` writes into a project
+templates/            files `init` writes into a project (config, project rules, the review workflow)
 examples/             a real project's configuration
 test/run.sh           offline tests (fake gh and claude, no network): `make test`
 Makefile              install / uninstall / test / lint (`make lint` runs shellcheck at warning level, as CI does)

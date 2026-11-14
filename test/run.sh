@@ -741,6 +741,33 @@ check "automerge: triage never adds or removes agent-automerge" '1|0' \
 check "automerge: the triage prompt says only a person sets it" 1 "$(grep -c 'agent-automerge' "$ROOT/prompts/triage.md")"
 : >"$GH_LOG"
 
+# --- init installs the Claude Code review workflow with allowed_bots: 'claude' ---
+init_wf() { # dir [args] -> runs init in a fresh git repo without labels
+  local d=$1; shift
+  AGENT_REPO="$d" "$ROOT/bin/agent-loop" init --no-labels "$@" >"$T/init.out" 2>&1
+}
+WF=.github/workflows/claude-code-review.yml
+git init -q -b main "$T/wf1"
+init_wf "$T/wf1"
+check "init: a project without the review workflow gets it, with allowed_bots: 'claude'" 1 "$(grep -c "^ *allowed_bots: 'claude'$" "$T/wf1/$WF")"
+git init -q -b main "$T/wf2"; mkdir -p "$T/wf2/.github/workflows"
+sed '/allowed_bots/d; /claude\[bot\] actor/d' "$ROOT/templates/claude-code-review.yml" >"$T/wf2/$WF"
+init_wf "$T/wf2"
+check "init: a workflow written without allowed_bots (by /install-github-app) gets it, under the token, once" '1|1' \
+  "$(grep -c "^          allowed_bots: 'claude'$" "$T/wf2/$WF")|$(grep -A1 'claude_code_oauth_token' "$T/wf2/$WF" | grep -c '# PRs opened by Claude itself')"
+init_wf "$T/wf2"
+check "init: running it again does not add the line twice" 1 "$(grep -c allowed_bots "$T/wf2/$WF")"
+git init -q -b main "$T/wf3"; mkdir -p "$T/wf3/.github/workflows"
+printf "          allowed_bots: 'claude, dependabot'\n  claude_code_oauth_token: x\nuses: anthropics/claude-code-action@v1\n" >"$T/wf3/$WF"
+cp "$T/wf3/$WF" "$T/wf3.orig"; init_wf "$T/wf3"
+check "init: a workflow that sets allowed_bots is left alone" 0 "$(diff "$T/wf3.orig" "$T/wf3/$WF" >/dev/null; echo $?)"
+git init -q -b main "$T/wf4"
+init_wf "$T/wf4" --no-workflow
+check "init: --no-workflow skips it" 'none' "$([ -e "$T/wf4/$WF" ] && echo present || echo none)"
+git init -q -b main "$T/wf5"
+init_wf "$T/wf5" --dry-run
+check "init: --dry-run writes no workflow" 'none' "$([ -e "$T/wf5/$WF" ] && echo present || echo none)"
+
 # --- CLI ---
 check "cli: version" "$(cat "$ROOT/VERSION")" "$("$ROOT/bin/agent-loop" version)"
 "$ROOT/bin/agent-loop" nope >/dev/null 2>&1; check "cli: unknown command exits 2" 2 $?
