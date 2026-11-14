@@ -243,17 +243,70 @@ candidates() { # issue numbers ready to start (excluding ones that are running o
   done
 }
 
+# --- Touches: do not run two issues at once when they declare the same files ---
+# An issue may carry a line "Touches: src/billing/**, docs/api.md". It is held back for this round while its globs overlap
+# (a) the Touches of an issue that is running or was started earlier in this round, or (b) the changed files of an open
+# agent PR. Issues without the line are never held back. The scripts decide; no model call.
+STARTED_NOW=""   # issues started in this round (also in a dry run)
+PRFILES="$STATE/prfiles.txt" PRFILES_BUILT=0
+touches_of() { jq -r --argjson n "$1" '.[] | select(.number == $n) | .touches[]?' "$ISSUES_JSON"; }
+# "<issue> <path>" per file of every open agent PR, read once per round and only when some issue has a Touches line.
+# (Called before hold_reason, which runs in a subshell and could not remember that it was built.)
+ensure_pr_files() {
+  local m p
+  [ "$PRFILES_BUILT" = 0 ] || return 0
+  PRFILES_BUILT=1
+  : >"$PRFILES"
+  jq -e 'any(.[]; (.touches | length) > 0)' "$ISSUES_JSON" >/dev/null || return 0
+  while read -r m p; do
+    gh pr view "$p" --json files -q '.files[].path' 2>/dev/null | sed "s|^|$m |" >>"$PRFILES" || true
+  done < <(jq -r '.[] | "\(.issue) \(.pr)"' "$PRS_JSON")
+}
+hold_reason() { # issue -> why it must wait (nothing = it may start)
+  local n=$1 mine g og m f line
+  mine=$(touches_of "$n")
+  [ -n "$mine" ] || return 0
+  for f in "$STATE"/running/*.pid; do
+    [ -f "$f" ] || continue
+    m=$(basename "$f" .pid)
+    [ "$m" != "$n" ] && is_running "$m" && STARTED_NOW="$STARTED_NOW $m"
+  done
+  for m in $STARTED_NOW; do
+    [ "$m" != "$n" ] || continue
+    while IFS= read -r og; do
+      [ -n "$og" ] || continue
+      while IFS= read -r g; do
+        if globs_overlap "$g" "$og"; then echo "its files ($g) overlap #$m, which is running (Touches: $og)"; return 0; fi
+      done <<<"$mine"
+    done < <(touches_of "$m")
+  done
+  while IFS= read -r line; do
+    m=${line%% *} f=${line#* }
+    [ "$m" != "$n" ] || continue
+    while IFS= read -r g; do
+      if globs_overlap "$g" "$f"; then echo "its files ($g) overlap the open PR of #$m ($f)"; return 0; fi
+    done <<<"$mine"
+  done <"$PRFILES"
+  return 0
+}
+
 phase_launch() {
-  local n
+  local n why
+  STARTED_NOW=""
+  ensure_pr_files
   for n in $(candidates); do
     [ "$(running_count)" -lt "$AGENT_MAX_PARALLEL" ] || return 0
+    why=$(hold_reason "$n")
+    if [ -n "$why" ]; then log "#$n: waits this round: $why"; continue; fi
     launch "$n" implement
+    STARTED_NOW="$STARTED_NOW $n"
   done
 }
 
 do_tick() {
   git -C "$REPO" fetch origin --prune --quiet
   running_count >/dev/null   # drops the pid files of finished agents
+  PRFILES_BUILT=0
   issues_snapshot >"$ISSUES_JSON"
   agent_prs >"$PRS_JSON"
   phase_cleanup
@@ -278,7 +331,7 @@ do_tick() {
 }
 
 show_status() {
-  local f n failing
+  local f n failing why
   paused && echo "== Paused by a usage limit until $(fmt_epoch "$(paused_until)") (resume now: agent-loop unpause)"
   failing=$(base_failing_names)
   [ -z "$failing" ] || echo "== Checks are failing on $BASE_REF ($failing): no agent starts until they pass"
@@ -298,7 +351,15 @@ show_status() {
   ISSUES_JSON=$(mktemp "$STATE/status-issues.XXXXXX") PRS_JSON=$(mktemp "$STATE/status-prs.XXXXXX")
   trap 'rm -f "$ISSUES_JSON" "$PRS_JSON"' EXIT
   issues_snapshot >"$ISSUES_JSON"; agent_prs >"$PRS_JSON"
-  for n in $(candidates); do jq -r --argjson n "$n" '.[] | select(.number == $n) | "#\(.number) \(.title)"' "$ISSUES_JSON"; done
+  PRFILES=$(mktemp "$STATE/status-prfiles.XXXXXX") PRFILES_BUILT=0
+  trap 'rm -f "$ISSUES_JSON" "$PRS_JSON" "$PRFILES"' EXIT
+  STARTED_NOW=""
+  ensure_pr_files
+  for n in $(candidates); do
+    jq -r --argjson n "$n" '.[] | select(.number == $n) | "#\(.number) \(.title)"' "$ISSUES_JSON" | tr -d '\n'
+    why=$(hold_reason "$n")
+    if [ -n "$why" ]; then echo "  [held back: $why]"; else echo; fi
+  done
   echo "== Worktrees"
   git -C "$REPO" worktree list | grep -F -- "$AGENT_WT_PREFIX-" || true
 }
