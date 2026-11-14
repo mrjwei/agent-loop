@@ -182,6 +182,14 @@ if [ "$mode" = implement ]; then
     # A comment that mentions AGENT_NOTIFY_USER: GitHub sends the push and the email (the PR itself was opened by the agent)
     [ -z "$cc" ] || run gh pr comment "$pr_now" --body "$AGENT_MARKER PR opened for #$n. Ready for review. $cc" >/dev/null || true
     notify "PR opened (#${n})" "PR #$pr_now: ${summary:-}" "$(pr_url "$pr_now")"
+    # The PR body must show the evidence for every acceptance criterion (prompts/implement.md). If the section is
+    # missing, say so once on the PR; no further run is started for it.
+    if [ "$(stamp_get criteria "$n" "")" != "$pr_now" ]; then
+      stamp_set criteria "$n" "$pr_now"
+      if ! gh pr view "$pr_now" --json body -q .body 2>/dev/null | grep -Eiq '^[[:space:]]*(#{1,6}|[*][*])[[:space:]]*acceptance criteria'; then
+        run gh pr comment "$pr_now" --body "$AGENT_MARKER This PR body has no \`## Acceptance criteria\` section. It should list each acceptance criterion of #$n with its evidence (the test, or the file and lines) or \`not done\`, so that a reviewer can see what is covered without reading the diff." >/dev/null || true
+      fi
+    fi
     exit 0
   fi
   if [ "$limited" = 1 ]; then

@@ -105,7 +105,7 @@ WORKER_ALLOW=(
   "Bash(git status:*)" "Bash(git diff:*)" "Bash(git log:*)" "Bash(git show:*)" "Bash(git add:*)"
   "Bash(git commit:*)" "Bash(git fetch:*)" "Bash(git merge:*)" "Bash(git push:*)"
   "Bash(gh issue view:*)" "Bash(gh pr view:*)" "Bash(gh pr create:*)" "Bash(gh pr checks:*)"
-  "Bash(gh pr diff:*)" "Bash(gh pr comment:*)" "Bash(gh run view:*)" "Bash(gh run list:*)"
+  "Bash(gh pr diff:*)" "Bash(gh pr comment:*)" "Bash(gh pr edit:*)" "Bash(gh run view:*)" "Bash(gh run list:*)"
   ${AGENT_EXTRA_ALLOW[@]+"${AGENT_EXTRA_ALLOW[@]}"}
 )
 WORKER_DENY=(

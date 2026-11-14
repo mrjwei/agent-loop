@@ -84,6 +84,8 @@ Agents run as `claude -p`, so they bill like any headless Claude Code use: again
 
 Every attempt after the first starts with what the previous run left behind: its summary, its `blocked_reason`, and how it ended (turn limit, timeout, checks still failing, usage limit), read from its result file in the logs. The line that starts a run in the log names the model it actually uses.
 
+Passing checks prove the project's checks pass, not that the issue is done. So the implement prompt requires a `## Acceptance criteria` section in the PR body: one line per criterion of the issue, each with its evidence (the test that covers it, or the file and lines) or `not done` with the reason, and a PR with a `not done` line uses `Refs #<n>` instead of `Closes #<n>`. The fix prompt keeps the section up to date. After an implement run opens a PR, `work.sh` checks that the body has the section and, if not, comments once on the PR; it starts no extra run for it. There is no second review pass, so this costs no extra tokens (screenshots or browser evidence for UI work are out of scope).
+
 Outcomes are judged by GitHub's real state (is a PR open?), not by what the agent claims. Implementation stops after 2 attempts and fixing after 3 rounds, each ending in `agent-blocked` plus a notification. Agents run in their own process group, so Ctrl-C on the loop leaves them running and `agent-loop kill` stops them completely.
 
 ### Lessons

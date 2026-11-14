@@ -34,6 +34,7 @@ case "$*" in
   "repo view"*) echo "o/r" ;;
   "pr list --head "*) # --head <branch> --state <state>
     jq --arg b "$4" --arg s "$6" '[.[] | select(.headRefName == $b and ($s == "all" or (.state | ascii_downcase) == $s))]' "$FIX/prs.json" | jq -r "$q" ;;
+  "pr view "*" --json body"*) f="$FIX/pr-body-$3.txt"; if [ -f "$f" ]; then cat "$f"; fi ;;
   "pr view "*" --json files"*) f="$FIX/pr-files-$3.json"; if [ -f "$f" ]; then jq -r "$q" "$f"; else echo '{"files":[]}' | jq -r "$q"; fi ;;
   "pr list --state merged"*) cat "$FIX/merged.json" ;;
   "api repos/o/r/commits/"*"/check-runs "*) jq "$q" "$FIX/check-runs.json" | { [ "$q" = . ] && cat || jq -r . ; } ;;
@@ -560,6 +561,28 @@ out=$(tick --dry-run)
 check "loop: an issue waits for the open PR's files only while that PR is open" 'start implement for #73' "$(echo "$out" | grep -o 'start implement for #73')"
 cp "$T/page1.orig" "$FIX/page1.json"; cp "$T/page2.orig" "$FIX/page2.json"; cp "$T/prs.touches.orig" "$FIX/prs.json"; rm -f "$FIX/pr-files-20.json"
 check "prompts: triage is asked for a Touches line" 1 "$(grep -c 'Touches: src/billing' "$ROOT/prompts/triage.md")"
+: >"$GH_LOG"
+
+# --- The PR states the evidence for every acceptance criterion (#27) ---
+check "prompts: the implement prompt requires the section and Refs for a criterion that is not done" '1|1' \
+  "$(T_N=3 T_BRANCH=agent/issue-3 render_prompt implement | grep -c '## Acceptance criteria.*not done.*Refs #3')|$(T_N=3 T_BRANCH=agent/issue-3 render_prompt implement | grep -c 'If any line is `not done`, write `Refs #3`')"
+check "prompts: the fix prompt keeps the section up to date" 1 "$(T_N=3 T_PR=20 T_BRANCH=agent/issue-3 render_prompt fix | grep -c 'Keep the `## Acceptance criteria` section')"
+open_pr() { # issue -> a command for the fake claude that "opens" a PR (number 100 + issue) on the agent branch
+  echo "jq '. + [{number:$((100 + $1)),state:\"OPEN\",title:\"p\",headRefName:\"agent/issue-$1\",headRefOid:\"x\",isCrossRepository:false,mergeable:\"MERGEABLE\",statusCheckRollup:[]}]' \"\$FIX/prs.json\" >\"\$FIX/prs.new\" && mv \"\$FIX/prs.new\" \"\$FIX/prs.json\""
+}
+cp "$FIX/prs.json" "$T/prs.criteria.orig"
+: >"$GH_LOG"
+result '{"status":"pr_opened","pr_number":156,"summary":"done"}' >"$T/pr56-result.jsonl"
+FAKE_CLAUDE_CMD="$(open_pr 56)" FAKE_CLAUDE_RESULT="$T/pr56-result.jsonl" "$B" "$ROOT/libexec/work.sh" 56 >"$T/work.out" 2>&1
+check "work: a PR opened without the section gets exactly one comment from the loop" 1 "$(grep -c '^pr comment 156 .*no `## Acceptance criteria` section' "$GH_LOG")"
+cp "$T/prs.criteria.orig" "$FIX/prs.json"; drop_work 56; rm -f "$STATE/stamp/criteria-56"
+: >"$GH_LOG"
+printf 'Closes #57\n\n## Acceptance criteria\n- parses the flag: test/run.sh "flag"\n' >"$FIX/pr-body-157.txt"
+result '{"status":"pr_opened","pr_number":157,"summary":"done"}' >"$T/pr57-result.jsonl"
+FAKE_CLAUDE_CMD="$(open_pr 57)" FAKE_CLAUDE_RESULT="$T/pr57-result.jsonl" "$B" "$ROOT/libexec/work.sh" 57 >"$T/work.out" 2>&1
+check "work: a PR body with the section gets no comment" 0 "$(grep -c '^pr comment 157 ' "$GH_LOG")"
+cp "$T/prs.criteria.orig" "$FIX/prs.json"; drop_work 57; rm -f "$STATE/stamp/criteria-57" "$FIX/pr-body-157.txt"
+printf 'x\n### Acceptance Criteria\n' | grep -Eiq '^[[:space:]]*(#{1,6}|[*][*])[[:space:]]*acceptance criteria' && ok "work: the check accepts any heading level and letter case" || ng "work: the check accepts any heading level and letter case"
 : >"$GH_LOG"
 
 # --- CLI ---
