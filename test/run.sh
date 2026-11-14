@@ -34,6 +34,9 @@ case "$*" in
   "repo view"*) echo "o/r" ;;
   "pr list --head "*) # --head <branch> --state <state>
     jq --arg b "$4" --arg s "$6" '[.[] | select(.headRefName == $b and ($s == "all" or (.state | ascii_downcase) == $s))]' "$FIX/prs.json" | jq -r "$q" ;;
+  "pr list --state merged"*) cat "$FIX/merged.json" ;;
+  "api repos/o/r/commits/"*"/check-runs "*) jq "$q" "$FIX/check-runs.json" | { [ "$q" = . ] && cat || jq -r . ; } ;;
+  "api repos/o/r/commits/"*"/status "*) jq "$q" "$FIX/status.json" | { [ "$q" = . ] && cat || jq -r . ; } ;;
   "pr list --state open"*) jq '[.[] | select(.state == "OPEN")]' "$FIX/prs.json" | jq -r "$q" ;;
   "issue list --state closed"*) echo '[]' ;;
   "issue list --label"*) echo '[]' | jq -r "$q" ;;
@@ -119,6 +122,7 @@ sed "s/HEAD3/$(git -C "$T/proj" rev-parse HEAD)/" >"$T/fixtures/prs.json" <<'EOF
  {"number":22,"state":"OPEN","title":"c","headRefName":"feature/x","headRefOid":"ccc","isCrossRepository":false,"mergeable":"MERGEABLE","statusCheckRollup":[]},
  {"number":9,"state":"MERGED","title":"d","headRefName":"agent/issue-1","headRefOid":"ddd","isCrossRepository":false,"mergeable":"UNKNOWN","statusCheckRollup":[]}]
 EOF
+echo '[]' >"$T/fixtures/merged.json"; echo '{"check_runs":[]}' >"$T/fixtures/check-runs.json"; echo '{"statuses":[]}' >"$T/fixtures/status.json"
 export PATH="$T/bin:$PATH" FIX="$T/fixtures" GH_LOG="$T/gh.log" AGENT_REPO="$T/proj" AGENT_NOTIFY=0
 : >"$GH_LOG"
 cd "$T/proj" || exit 1
@@ -380,6 +384,56 @@ check "block_issue: the comment says an answer alone is enough" 1 "$(grep -c 'An
 : >"$GH_LOG"
 AGENT_AUTO_RESUME=0 block_issue 3 "why"
 check "block_issue: with AGENT_AUTO_RESUME=0 it still asks to remove the label" 1 "$(grep -c 'then remove the `agent-blocked` label' "$GH_LOG")"
+: >"$GH_LOG"
+
+# --- Checks on the base branch (#23) ---
+head_sha=$(git -C "$T/proj" rev-parse origin/main)
+parent_sha=$(git -C "$T/proj" rev-parse "origin/main~1")
+printf '[{"number":9,"title":"Add billing","mergeCommit":{"oid":"%s"}},{"number":8,"title":"Old","mergeCommit":{"oid":"%s"}}]\n' \
+  "$head_sha" "0000000000000000000000000000000000000000" >"$FIX/merged.json"
+runs() { printf '{"check_runs":%s}\n' "$1" >"$FIX/check-runs.json"; }
+runs '[{"name":"test","status":"completed","conclusion":"failure"},{"name":"lint","status":"completed","conclusion":"success"}]'
+check "commit_checks: failing and passing check runs" 'FAIL test|OK lint' "$(commit_checks "$head_sha" | tr '\n' '|' | sed 's/|$//')"
+printf '{"statuses":[{"context":"ci/legacy","state":"error"},{"context":"ci/slow","state":"pending"}]}\n' >"$FIX/status.json"
+check "commit_checks: commit statuses too, and AGENT_IGNORE_CHECKS names are left out" 'FAIL test|OK lint|PENDING ci/slow' \
+  "$(AGENT_IGNORE_CHECKS='ci/legacy' commit_checks "$head_sha" | tr '\n' '|' | sed 's/|$//')"
+check "base_failing_names: failing names, comma-separated" 'ci/legacy, test' "$(base_failing_names)"
+echo '{"statuses":[]}' >"$FIX/status.json"
+echo "$parent_sha" >"$STATE/base-last-green-sha"
+out=$(tick --dry-run)
+check "loop: failing checks on the base head start no agent and open one issue" '0|1|1' \
+  "$(echo "$out" | grep -c 'start implement')|$(echo "$out" | grep -c 'Checks are failing on origin/main')|$(echo "$out" | grep -c 'dry-run. gh issue create --title Checks failing on main: test')"
+check "status: says so at the top" 'Checks are failing on origin/main (test): no agent starts until they pass' \
+  "$("$B" "$ROOT/libexec/loop.sh" --status 2>&1 | grep 'Checks are failing' | sed 's/^== //')"
+: >"$GH_LOG"; : >"$NOTIFY_OUT"; rm -f "$STATE/base-failed-sha"
+for _ in 1 2; do AGENT_NOTIFY=1 AGENT_NOTIFY_CMD="$T/notify.sh" AGENT_MAX_PARALLEL=0 tick >/dev/null; done
+check "loop: one issue and one notification per failing commit, across rounds" '1|1' \
+  "$(grep -c '^issue create ' "$GH_LOG")|$(grep -c '^Checks failing on main|test. No agent starts until they pass.|' "$NOTIFY_OUT")"
+body=$(grep -A20 '^issue create ' "$GH_LOG")
+case "$body" in
+  *"Commit: $head_sha"*'`test`'*"since the last commit that passed (${parent_sha:0:7})"*"- #9 Add billing"*) ok "loop: the issue names the commit, the failing checks and the PRs merged since the last passing commit" ;;
+  *) ng "loop: the issue names the commit, the failing checks and the PRs merged since the last passing commit" "$body" ;;
+esac
+case "$body" in *"- #8 Old"*) ng "loop: PRs outside the range are not listed" ;; *) ok "loop: PRs outside the range are not listed" ;; esac
+case "$body" in *"label this issue"*|*"hand it to an agent"*) ng "loop: the issue does not offer agent-ok" ;; *) ok "loop: the issue does not offer agent-ok" ;; esac
+check "loop: the issue is created without labels" 0 "$(grep '^issue create ' "$GH_LOG" | grep -c -e '--label')"
+runs '[{"name":"test","status":"in_progress","conclusion":null},{"name":"lint","status":"completed","conclusion":"failure"}]'
+rm -f "$STATE/base-failed-sha"
+check "loop: ignored failing checks do not block" 'start' "$(AGENT_IGNORE_CHECKS=lint tick --dry-run | grep -o 'start implement' | head -1 | sed 's/ implement//')"
+runs '[{"name":"test","status":"in_progress","conclusion":null}]'
+out=$(tick --dry-run)
+check "loop: pending checks block nothing and open no issue" '1|0' \
+  "$(echo "$out" | grep -c 'start implement for #1')|$(echo "$out" | grep -c 'gh issue create')"
+runs '[]'
+out=$(tick --dry-run)
+check "loop: a base branch without checks behaves as before" '1|0' \
+  "$(echo "$out" | grep -c 'start implement for #1')|$(echo "$out" | grep -c 'gh issue create')"
+runs '[{"name":"test","status":"completed","conclusion":"success"}]'
+rm -f "$STATE/base-last-green-sha"
+AGENT_MAX_PARALLEL=0 tick >/dev/null
+check "loop: agents resume when the base head passes, and that commit is remembered as good" "$head_sha" "$(cat "$STATE/base-last-green-sha")"
+check "loop: starts again after the head passes" 1 "$(tick --dry-run | grep -c 'start implement for #1')"
+runs '[]'; rm -f "$STATE/base-last-green-sha" "$STATE/base-failed-sha"
 : >"$GH_LOG"
 
 # --- CLI ---
