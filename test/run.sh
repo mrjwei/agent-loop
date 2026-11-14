@@ -36,6 +36,7 @@ case "$*" in
     jq --arg b "$4" --arg s "$6" '[.[] | select(.headRefName == $b and ($s == "all" or (.state | ascii_downcase) == $s))]' "$FIX/prs.json" | jq -r "$q" ;;
   "pr list --state open"*) jq '[.[] | select(.state == "OPEN")]' "$FIX/prs.json" | jq -r "$q" ;;
   "issue list --state closed"*) echo '[]' ;;
+  "issue list --label"*) echo '[]' | jq -r "$q" ;;
   "label list"*) echo '[{"name":"agent-ok"},{"name":"agent-wip"},{"name":"agent-blocked"},{"name":"human"},{"name":"bug"}]' | jq -r "$q" ;;
   "issue edit"* | "issue comment"* | "pr comment"* | "label create"*) echo "$*" >>"$GH_LOG" ;;
   "issue create"*) echo "$*" >>"$GH_LOG"; echo "https://github.com/o/r/issues/101" ;;
@@ -59,7 +60,15 @@ EOF
 cat >"$T/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 # Fake claude for test/run.sh: ignores the prompt, runs $FAKE_CLAUDE_CMD (what the "agent" does in the worktree)
-# and prints the stream in $FAKE_CLAUDE_RESULT
+# and prints the stream in $FAKE_CLAUDE_RESULT. Records its arguments in $FAKE_CLAUDE_ARGS when set.
+# Like the real CLI, it stops at the first unknown option (--max-budget-usd is unknown with FAKE_CLAUDE_NO_COST_CAP=1).
+case " $* " in
+  *" --zz-probe "*)
+    if [ -n "${FAKE_CLAUDE_NO_COST_CAP:-}" ] && [[ " $* " == *" --max-budget-usd "* ]]; then echo "error: unknown option '--max-budget-usd'"
+    else echo "error: unknown option '--zz-probe'"; fi
+    exit 1 ;;
+esac
+[ -z "${FAKE_CLAUDE_ARGS:-}" ] || echo "$*" >>"$FAKE_CLAUDE_ARGS"
 cat >/dev/null
 [ -z "${FAKE_CLAUDE_CMD:-}" ] || bash -c "$FAKE_CLAUDE_CMD" >/dev/null 2>&1
 cat "$FAKE_CLAUDE_RESULT"
@@ -294,6 +303,51 @@ out=$(AGENT_NOTIFY=1 AGENT_NOTIFY_CMD='exit 3' notify t b 2>&1); rc=$?
 check "notify: a failing AGENT_NOTIFY_CMD is logged and ignored" '0|1' "$rc|$(echo "$out" | grep -c 'notification command failed')"
 check "notify: no code path calls osascript, and the README does not list it" '' \
   "$(grep -rIl osascript "$ROOT/bin" "$ROOT/lib" "$ROOT/libexec" "$ROOT/prompts" "$ROOT/templates" "$ROOT/README.md" 2>/dev/null)"
+: >"$GH_LOG"
+
+# --- Run timeout, cost cap and daily budget ---
+result '{"status":"pr_opened","pr_number":1,"summary":"x"}' >"$T/any-result.jsonl"
+drop_work() { git -C "$T/proj" worktree remove --force "$(wt_of "$1")" 2>/dev/null; git -C "$T/proj" branch -qD "agent/issue-$1" 2>/dev/null; count_reset attempts "$1"; }
+t0=$SECONDS
+FAKE_CLAUDE_CMD='sleep 30' FAKE_CLAUDE_RESULT="$T/any-result.jsonl" AGENT_RUN_TIMEOUT=2 \
+  "$B" "$ROOT/libexec/work.sh" 51 >"$T/work.out" 2>&1; rc=$?
+elapsed=$((SECONDS - t0))
+check "work: a run past AGENT_RUN_TIMEOUT is stopped, counted as an attempt, its slot freed, the worktree kept" '1|1|gone|kept|fast' \
+  "$rc|$(count_get attempts 51)|$([ -f "$(pid_file 51)" ] || echo gone)|$([ -d "$(wt_of 51)" ] && echo kept)|$([ "$elapsed" -lt 20 ] && echo fast || echo "slow ($elapsed s)")"
+check "work: the timeout is said in the log" 1 "$(grep -c 'exceeded AGENT_RUN_TIMEOUT (2s)' "$T/work.out")"
+drop_work 51
+: >"$T/claude.args"
+FAKE_CLAUDE_ARGS="$T/claude.args" FAKE_CLAUDE_RESULT="$T/any-result.jsonl" AGENT_MAX_COST_PER_RUN=2.5 \
+  "$B" "$ROOT/libexec/work.sh" 52 >"$T/work.out" 2>&1
+check "work: AGENT_MAX_COST_PER_RUN is passed to the claude CLI's spend cap" 1 "$(grep -c -e '--max-budget-usd 2.5' "$T/claude.args")"
+drop_work 52
+: >"$T/claude.args"
+FAKE_CLAUDE_NO_COST_CAP=1 FAKE_CLAUDE_ARGS="$T/claude.args" FAKE_CLAUDE_RESULT="$T/any-result.jsonl" AGENT_MAX_COST_PER_RUN=2.5 \
+  "$B" "$ROOT/libexec/work.sh" 52 >"$T/work.out" 2>&1
+check "work: a claude CLI without the option skips AGENT_MAX_COST_PER_RUN with a warning" '0|1' \
+  "$(grep -c -e '--max-budget-usd' "$T/claude.args")|$(grep -c 'warning: this claude CLI has no --max-budget-usd' "$T/work.out")"
+drop_work 52
+
+d=$(date +%Y%m%d)
+echo '{"total_cost_usd":5}' >"$STATE/logs/issue-9-$d-010101-fix.json"
+echo '{"total_cost_usd":1.5}' >"$STATE/logs/triage-$d-010102.json"
+echo '{"total_cost_usd":100}' >"$STATE/logs/issue-9-20200101-010101-fix.json"
+check "spend_today: sums today's result files only" 6.50 "$(spend_today)"
+over() { AGENT_DAILY_BUDGET=$1 over_budget && echo over || echo under; }
+check "over_budget: at or over the budget, under it, and off when empty" 'over under under' "$(over 6) $(over 7) $(over '')"
+out=$(AGENT_DAILY_BUDGET=6 tick --dry-run)
+check "loop: over the daily budget a round starts no agent and says why" '0|1' \
+  "$(echo "$out" | grep -c 'start implement')|$(echo "$out" | grep -c 'Daily budget reached: \$6.50 of \$6 spent today')"
+check "loop: under the budget agents start as before" '1 7 8' \
+  "$(AGENT_DAILY_BUDGET=7 tick --dry-run | sed -n 's/.*start implement for #\([0-9]*\).*/\1/p' | tr '\n' ' ' | sed 's/ $//')"
+out=$(AGENT_DAILY_BUDGET=6 "$B" "$ROOT/libexec/loop.sh" --status 2>&1)
+check "status: shows today's spend, the budget and that it is reached" '1|1' \
+  "$(echo "$out" | grep -c 'Spend today: \$6.50 of \$6 (AGENT_DAILY_BUDGET)')|$(echo "$out" | grep -c 'Daily budget reached')"
+: >"$NOTIFY_OUT"; rm -f "$STATE/budget-notified"
+AGENT_DAILY_BUDGET=6 AGENT_NOTIFY=1 AGENT_NOTIFY_CMD="$T/notify.sh" tick >/dev/null
+AGENT_DAILY_BUDGET=6 AGENT_NOTIFY=1 AGENT_NOTIFY_CMD="$T/notify.sh" tick >/dev/null
+check "loop: the budget notification is sent once a day" 1 "$(grep -c '^Agents paused|Daily budget reached' "$NOTIFY_OUT")"
+rm -f "$STATE/logs/issue-9-"*.json "$STATE/logs/triage-$d-010102.json" "$STATE/budget-notified"
 : >"$GH_LOG"
 
 # --- CLI ---

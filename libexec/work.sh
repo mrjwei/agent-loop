@@ -88,20 +88,49 @@ export AGENT_LOOP_RUN=1 AGENT_VERIFY_CMD AGENT_BASE_BRANCH
 ts=$(date +%Y%m%d-%H%M%S)
 stream="$STATE/logs/issue-$n-$ts-$mode.jsonl"   # the whole conversation
 out="${stream%.jsonl}.json"                      # the final result only
-log "#$n: starting $mode ($AGENT_MODEL / ${AGENT_EFFORT}, worktree ${wt})"
-rc=0
-printf '%s' "$prompt" | without_credentials claude -p --strict-mcp-config \
+cost_args=()
+if [ -n "$AGENT_MAX_COST_PER_RUN" ]; then
+  if claude_has_cost_cap; then cost_args=(--max-budget-usd "$AGENT_MAX_COST_PER_RUN")
+  else log "#$n: warning: this claude CLI has no --max-budget-usd, so AGENT_MAX_COST_PER_RUN is skipped"; fi
+fi
+log "#$n: starting $mode ($AGENT_MODEL / ${AGENT_EFFORT}, worktree ${wt}, limit ${AGENT_RUN_TIMEOUT}s)"
+rc=0 timed_out=0
+# The agent runs as the leader of its own process group (a background subshell under job control), so that the
+# timeout below can stop claude and everything it started without stopping this script
+set -m
+(printf '%s' "$prompt" | without_credentials claude -p --strict-mcp-config \
   --model "$AGENT_MODEL" --effort "$AGENT_EFFORT" \
   --permission-mode "$AGENT_PERMISSION_MODE" --max-turns "$AGENT_MAX_TURNS" --settings "$(agent_settings)" \
-  --allowedTools "${WORKER_ALLOW[@]}" --disallowedTools "${WORKER_DENY[@]}" \
-  --output-format stream-json --verbose --json-schema "$WORKER_SCHEMA" --name "agent #$n $mode" \
-  >"$stream" 2>"$out.stderr" || rc=$?
+  --allowedTools "${WORKER_ALLOW[@]}" --disallowedTools "${WORKER_DENY[@]}" ${cost_args[@]+"${cost_args[@]}"} \
+  --output-format stream-json --verbose --json-schema "$WORKER_SCHEMA" --name "agent #$n $mode") \
+  >"$stream" 2>"$out.stderr" &
+agent_pid=$!
+set +m
+# `agent-loop kill` stops this script's process group, which no longer contains the agent: pass the signal on to it
+trap 'kill -TERM -- "-$agent_pid" 2>/dev/null || true; exit 143' TERM INT HUP
+started_at=$SECONDS
+while kill -0 "$agent_pid" 2>/dev/null; do
+  if [ "$AGENT_RUN_TIMEOUT" -gt 0 ] && [ $((SECONDS - started_at)) -ge "$AGENT_RUN_TIMEOUT" ]; then
+    timed_out=1
+    log "#$n: $mode exceeded AGENT_RUN_TIMEOUT (${AGENT_RUN_TIMEOUT}s); stopping the agent"
+    stop_agent "$agent_pid"
+    sleep 2
+    kill -KILL -- "-$agent_pid" 2>/dev/null || true
+    break
+  fi
+  sleep 1
+done
+wait "$agent_pid" 2>/dev/null || rc=$?
 result_of "$stream" >"$out" || true
 pause_if_heavy_usage "$stream"
 
 status=$(jq -r '.structured_output.status // empty' "$out" 2>/dev/null || true)
 summary=$(jq -r '.structured_output.summary // .result // empty' "$out" 2>/dev/null || true)
 reason=$(jq -r '.structured_output.blocked_reason // empty' "$out" 2>/dev/null || true)
+if [ "$timed_out" = 1 ]; then
+  # A run that was stopped did not finish, whatever its last message said; the attempt or fix round stays counted
+  status="" reason="The run was stopped after ${AGENT_RUN_TIMEOUT}s (AGENT_RUN_TIMEOUT)."
+fi
 sid=$(jq -r '.session_id // empty' "$out" 2>/dev/null || true)
 log "#$n: $mode finished (exit code ${rc}, status=${status:-none}, $(jq -r '"\(.subtype // "?"), \(.num_turns // "?") turns, $\(.total_cost_usd // 0 | . * 100 | round / 100)"' "$out" 2>/dev/null || echo 'no result'))"
 log "#$n: recording ${stream}; open the conversation with: cd $wt && claude -r $sid"
@@ -112,7 +141,7 @@ resume_hint="worktree: \`$(basename "$wt")\`, conversation: \`claude -r $sid\` (
 pr_now=$(pr_of_branch "$br" open)
 # Did it stop on a usage limit / overload before finishing? (a finished run has a status)
 limited=0
-if [ -z "$status" ] && resume_at=$(limit_resume_at "$stream"); then
+if [ "$timed_out" = 0 ] && [ -z "$status" ] && resume_at=$(limit_resume_at "$stream"); then
   limited=1
   pause_until "$resume_at"
 fi

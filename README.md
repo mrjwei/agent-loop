@@ -131,6 +131,9 @@ Three events need a person: an agent stopped (`agent-blocked`), a PR was opened,
 | `AGENT_POLL_SECONDS` | `300` | Time between rounds |
 | `AGENT_MAX_ATTEMPTS` / `AGENT_MAX_FIXES` | `2` / `3` | Attempts and fix rounds before `agent-blocked` |
 | `AGENT_MAX_TURNS` / `AGENT_TRIAGE_MAX_TURNS` | `150` / `80` | Turn limit per agent / triage run |
+| `AGENT_RUN_TIMEOUT` | `3600` | Seconds one implement or fix run may take. Then its process group is stopped, the run counts as a failed attempt or fix round, and the worktree stays so the next attempt continues from it. `0` = no limit |
+| `AGENT_MAX_COST_PER_RUN` | empty (off) | API-equivalent dollars one run may cost, passed to the `claude` CLI's own `--max-budget-usd`. `agent-loop doctor` says whether the installed CLI has it; if not, the variable is skipped with a warning |
+| `AGENT_DAILY_BUDGET` | empty (off) | API-equivalent dollars per local day. The loop sums `total_cost_usd` of today's result files in the logs; when it reaches the budget, rounds skip the fix, triage and start steps until the next day (cleanup continues) and one notification is sent. `agent-loop status` shows today's spend and the budget |
 | `AGENT_TRIAGE_MAX_ACTIONS` | `15` | Changes applied per triage |
 | `AGENT_PAUSE_AT_UTILIZATION` | `0.8` | Stop starting agents when a usage window passes this share |
 | `AGENT_LIMIT_PAUSE_SECONDS` | `1800` | Wait when a limit hits and no reset time is known |
