@@ -61,6 +61,7 @@ agent-loop kill                                        # stop running agents and
 agent-loop unpause                                     # clear a usage-limit pause
 agent-loop work <issue> [--fix]                        # run a single issue by hand
 agent-loop triage [--dry-run]                          # sync issues with plan files
+agent-loop lessons [--days N]                          # why agents stopped and what reviewers asked for (default 30 days), newest first
 agent-loop labels                                      # (re)create the labels
 agent-loop doctor                                      # check tools, claude CLI options, gh auth, base branch
 agent-loop version
@@ -84,6 +85,10 @@ Agents run as `claude -p`, so they bill like any headless Claude Code use: again
 Every attempt after the first starts with what the previous run left behind: its summary, its `blocked_reason`, and how it ended (turn limit, timeout, checks still failing, usage limit), read from its result file in the logs. The line that starts a run in the log names the model it actually uses.
 
 Outcomes are judged by GitHub's real state (is a PR open?), not by what the agent claims. Implementation stops after 2 attempts and fixing after 3 rounds, each ending in `agent-blocked` plus a notification. Agents run in their own process group, so Ctrl-C on the loop leaves them running and `agent-loop kill` stops them completely.
+
+### Lessons
+
+The reason an agent stopped is written to an issue comment, and review feedback to a PR; both are easy to forget, and the same missing rule (an undocumented convention, a command that needs a person) blocks later issues again. So the loop also appends one line to `.git/agent-loop/lessons.jsonl` when an issue is blocked, and one per review comment when a fix run finishes. `agent-loop lessons [--days N]` prints them newest first with the issue numbers, and the path of `.agent-loop/prompts/project.md`, where you turn the recurring ones into rules. Nothing summarizes the file: you decide what becomes a rule, so it costs no tokens.
 
 ### Notifications
 
@@ -192,6 +197,7 @@ Everything is under `.git/agent-loop/` (outside version control, shared by all w
 | `logs/issue-<n>-<time>-<…>.log` | `work.sh` output |
 | `logs/triage-<time>.json(l)`, `.applied.log`, `.issue-<n>.old-body.md` | Triage proposal, changes applied, previous issue bodies |
 | `base-failed-sha`, `base-last-green-sha` | The base commit an issue was opened for, and the last base commit seen passing |
+| `lessons.jsonl` | One line per agent stop (time, issue, mode, reason) and per review comment a fix run was started for (author, first line). Kept; read by `agent-loop lessons`. No model reads or summarizes it |
 | `paused-until` | End of a usage-limit pause (epoch seconds) |
 | `running/<n>.pid`, `count/`, `stamp/` | Running agents, retry counters, feedback timestamps |
 

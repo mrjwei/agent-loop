@@ -208,7 +208,7 @@ phase_fix() {
     log "#$n: PR #$(echo "$p" | jq .pr) needs work ($(echo "$reasons" | jq -r '[if .conflict then "conflict" else empty end, (.failing[] | "failing: \(.)"), (if (.feedback | length) > 0 then "\(.feedback | length) feedback item(s)" else empty end)] | join(", ")'))"
     if [ "$(count_get fixes "$n")" -ge "$AGENT_MAX_FIXES" ]; then
       run gh pr comment "$(echo "$p" | jq .pr)" --body "$AGENT_MARKER Conflicts, failing checks or feedback remain after ${AGENT_MAX_FIXES} fix rounds. Waiting for a human." >/dev/null
-      block_issue "$n" "PR #$(echo "$p" | jq .pr) still has conflicts, failing checks or feedback after ${AGENT_MAX_FIXES} fix rounds."
+      block_issue "$n" "PR #$(echo "$p" | jq .pr) still has conflicts, failing checks or feedback after ${AGENT_MAX_FIXES} fix rounds." fix
       continue
     fi
     [ "$(running_count)" -lt "$AGENT_MAX_PARALLEL" ] || { log "No free slot; fixing waits for the next round"; return; }
