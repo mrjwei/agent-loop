@@ -71,6 +71,7 @@ agent-loop version
 | # | Step | What happens |
 |---|---|---|
 | 1 | Clean up | For PRs merged, closed unmerged, or whose issue closed: remove the worktree `../<repo>-agent-<n>`, the local and remote branch, and the state. If the issue is still open (the PR was closed unmerged, or merged without closing the issue), it loses `agent-ok` once, with a comment saying why, so the same work does not start again. Logs older than 14 days are deleted. |
+| 1b | Resume | An open issue labeled `agent-blocked` whose last "Stopped working on this" comment from the loop was followed by a comment from a trusted author (`AGENT_TRUSTED_ASSOCIATIONS` / `AGENT_TRUSTED_USERS`) that does not start with `🤖 agent:` loses `agent-blocked`. It then follows the normal path: a new attempt, or a fix run when its PR is open. Comments from anyone else never resume an issue. `AGENT_AUTO_RESUME=0` turns this off. |
 | 2 | Fix | An open PR on branch `agent/issue-<n>` of this repository (a PR from a fork never counts) with a conflict, a failing check or new review feedback from a trusted author gets `work --fix`. Nothing runs if nothing changed since the last fix. After 3 rounds it becomes `agent-blocked`, and so does a PR whose fix run pushed nothing while the conflict or failing check remains (for example a flaky check: re-run it, then remove the label). |
 | 3 | Triage | When nothing is ready to start and the base branch moved since the last triage, run triage (only if `AGENT_PLANS_GLOB` is set). |
 | 4 | Start | Issues with `agent-ok`, without `human` / `agent-blocked`, with no sub-issues and all dependencies closed start in number order, up to `AGENT_MAX_PARALLEL`. Dependencies are GitHub's "blocked by" relations plus a `Depends on: #12, #13` line in the body. |
@@ -100,13 +101,13 @@ Three events need a person: an agent stopped (`agent-blocked`), a PR was opened,
 |---|---|---|
 | `agent-ok` | An agent may take this issue | triage, or you |
 | `agent-wip` | An agent is working on it, or its PR awaits review | the loop |
-| `agent-blocked` | The agent stopped; the reason is in an issue comment | the loop. **You remove it after answering**, and work resumes |
+| `agent-blocked` | The agent stopped; the reason is in an issue comment | the loop. **Your answer in a comment is enough**: the next round removes it and work resumes (removing it by hand works too, and is needed with `AGENT_AUTO_RESUME=0`) |
 | `human` | Work only a person can do; `agent-ok` is never added | you, or triage |
 
 ### What you do
 
 - Review and merge PRs. A PR that covers the whole issue closes it on merge; one that leaves part for you says so in its body and keeps the issue open, without `agent-ok`. Comment on a PR to ask for changes; the next round reads the comment, then fixes or replies with a comment starting `🤖 agent:`.
-- Answer `agent-blocked` issues in a comment, then remove the label. The previous conversation opens with `cd ../<repo>-agent-<n> && claude -r <session-id>` (the id is in the issue comment and the log).
+- Answer `agent-blocked` issues in a comment. The loop sees an answer from a trusted author in its next round and removes the label itself, so a reply from the GitHub mobile app is enough (comments from anyone else never resume an issue; with `AGENT_AUTO_RESUME=0`, remove the label yourself). The previous conversation opens with `cd ../<repo>-agent-<n> && claude -r <session-id>` (the id is in the issue comment and the log).
 
 ## Configuration
 
@@ -129,6 +130,7 @@ Three events need a person: an agent stopped (`agent-blocked`), a PR was opened,
 | `AGENT_PERMISSION_MODE` | `auto` | `acceptEdits` is stricter: anything not on the allow list is refused |
 | `AGENT_MAX_PARALLEL` | `2` | Agents at once |
 | `AGENT_POLL_SECONDS` | `300` | Time between rounds |
+| `AGENT_AUTO_RESUME` | `1` | A comment from a trusted author after the loop's block comment removes `agent-blocked` in the next round. `0` = a person removes the label |
 | `AGENT_MAX_ATTEMPTS` / `AGENT_MAX_FIXES` | `2` / `3` | Attempts and fix rounds before `agent-blocked` |
 | `AGENT_MAX_TURNS` / `AGENT_TRIAGE_MAX_TURNS` | `150` / `80` | Turn limit per agent / triage run |
 | `AGENT_RUN_TIMEOUT` | `3600` | Seconds one implement or fix run may take. Then its process group is stopped, the run counts as a failed attempt or fix round, and the worktree stays so the next attempt continues from it. `0` = no limit |
