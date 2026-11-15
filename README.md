@@ -42,7 +42,7 @@ agent-loop init        # writes .agent-loop.conf, .agent-loop/prompts/project.md
 | Config | `.agent-loop.conf`, with setup and verify commands guessed from `package.json`, `go.mod`, `Cargo.toml` or a Makefile |
 | Project rules | `.agent-loop/prompts/project.md`, a stub for what an agent cannot guess from the code |
 | Stop hook (only with `--hook`) | `.claude/hooks/agent-loop-verify.sh`, merged into `.claude/settings.json`, for people's interactive sessions too. The loop does not need it: every agent run gets the same hook through `--settings`. |
-| Review workflow | `.github/workflows/claude-code-review.yml` with `allowed_bots: 'claude'`, because PRs the loop opens run as the `claude[bot]` actor and the action otherwise fails with "Workflow initiated by non-human actor". A workflow that already exists (for example from `/install-github-app`) is kept, and gets the line if it lacks it. Skip with `--no-workflow`. |
+| Review workflow | `.github/workflows/claude-code-review.yml`, an independent review that blocks only on real findings and checks the acceptance criteria (see "Review workflow"), with `allowed_bots: 'claude'`, because PRs the loop opens run as the `claude[bot]` actor and the action otherwise fails with "Workflow initiated by non-human actor". A workflow that already exists (for example from `/install-github-app`) is kept, and gets the line if it lacks it. Skip with `--no-workflow`. |
 | Labels | `agent-ok`, `agent-wip`, `agent-blocked`, `human`, `agent-automerge` (skip with `--no-labels`) |
 
 Then:
@@ -103,6 +103,23 @@ Every agent PR waits for you to merge it, and the issues that depend on it wait 
 - the checks on the head of the base branch are not failing (see round step 1c).
 
 The merge uses `AGENT_AUTOMERGE_METHOD` (`squash` by default; `merge` or `rebase`), pinned to the head commit that was checked, and is announced with a comment on the PR and a notification. If a labeled PR is not merged, the log says why, once per reason. The loop makes the merge itself: `gh pr merge` stays denied to the agents, and the loop adds no review pass of its own, so this costs no tokens. A project that wants an independent review before merging supplies it outside the loop (a review bot, a required check) and names it in `AGENT_AUTOMERGE_REQUIRE_REVIEW`. Branch protection still applies: if GitHub refuses the merge, the loop logs it and tries again next round.
+
+### Review workflow
+
+Passing checks prove the project's checks pass, not that the issue is done, and the `## Acceptance criteria` section the implementer writes is self-reported. `agent-loop init` writes `.github/workflows/claude-code-review.yml` (from `templates/claude-code-review.yml`; an existing file is kept, and gets `allowed_bots` if it lacks it; `--force` replaces it with the template, `--no-workflow` skips it) that adds an independent reviewer, run by [claude-code-action](https://github.com/anthropics/claude-code-action). It needs the repository secret `CLAUDE_CODE_OAUTH_TOKEN` and the Claude GitHub App. Its contract:
+
+- **One comment, updated in place** (`use_sticky_comment: true`), on every push, instead of a new comment per push. The loop reads a comment from the time it was last edited, so an updated comment counts as new.
+- **It reports only findings that block the merge**: a bug, a security problem, a broken rule from `CLAUDE.md`, an acceptance criterion that is not met. When there are none, the comment starts with `No issues found.`, and nits go under an `## Optional` heading after it. With findings, the comment starts with `## Blocking findings` and never contains the words "No issues found".
+- **It checks the acceptance criteria.** It reads the issue the PR closes and compares each criterion with the PR's `## Acceptance criteria` section and with the diff. A criterion missing from the section, marked `not done` while the PR says `Closes`, or whose evidence does not hold (the test is not there, or does not test it) is a blocking finding. The review runs in a fresh context, so it grades independently of the implementer.
+- The bot settings are the same as in agent-loop's own workflow (`allowed_bots: 'claude'`, so PRs opened by the loop's own agents are reviewed).
+
+How it fits the loop's settings:
+
+| Setting | With this workflow |
+|---|---|
+| `AGENT_CLEAN_REVIEW_USER` (default `claude[bot]`) | The login that posts the comment. A `No issues found` comment from it is not feedback; a comment with blocking findings is, so a fix round starts, and after `AGENT_MAX_FIXES` rounds the issue is blocked. Nits under `## Optional` after a `No issues found.` start nothing. If your comments come from another login (the action posts as `github-actions[bot]` when you give it `github_token`), set this to that login |
+| `AGENT_IGNORE_CHECKS` | Add the job name, `claude-review`: a failed review *job* (an outage, a missing secret) should not start fix runs. The review's findings are the comment, not the job's status |
+| `AGENT_AUTOMERGE_REQUIRE_REVIEW` | Set it to the same login: the loop then merges only when that login's latest comment is clean and newer than the PR's last commit. A review of an older commit does not count |
 
 ### Stats and the daily digest
 

@@ -331,14 +331,15 @@ last_done_pr() { # branch
     -q '[.[] | select((.isCrossRepository | not) and .state != "OPEN")] | max_by(.number) // empty | "\(.number) \(.state)"'
 }
 
-# New feedback on a PR since a timestamp. Only from trusted authors (AGENT_TRUSTED_ASSOCIATIONS / AGENT_TRUSTED_USERS):
+# New feedback on a PR since a timestamp. A comment counts from the time it was last edited (updated_at): a review bot that keeps
+# one "sticky" comment and updates it in place on every push would otherwise never be heard again. Only from trusted authors (AGENT_TRUSTED_ASSOCIATIONS / AGENT_TRUSTED_USERS):
 # the text goes into the fix prompt, so nobody else may put words there. Also excludes ignored bots, the agent's own
 # comments and reviews with no comment
 pr_feedback() { # pr since
   local r; r=$(gh_repo)
   {
-    gh api --paginate "repos/$r/issues/$1/comments" --jq '.[] | {u: .user.login, a: .author_association, t: .created_at, where: "PR comment", b: (.body // "")}'
-    gh api --paginate "repos/$r/pulls/$1/comments" --jq '.[] | {u: .user.login, a: .author_association, t: .created_at, where: "\(.path):\(.line // .original_line // "")", b: (.body // "")}'
+    gh api --paginate "repos/$r/issues/$1/comments" --jq '.[] | {u: .user.login, a: .author_association, t: (.updated_at // .created_at), where: "PR comment", b: (.body // "")}'
+    gh api --paginate "repos/$r/pulls/$1/comments" --jq '.[] | {u: .user.login, a: .author_association, t: (.updated_at // .created_at), where: "\(.path):\(.line // .original_line // "")", b: (.body // "")}'
     gh api --paginate "repos/$r/pulls/$1/reviews" --jq '.[] | {u: .user.login, a: .author_association, t: .submitted_at, where: "review (\(.state))", b: (.body // "")}'
   } | jq -s --arg since "$2" --arg m "$AGENT_MARKER" --arg ign "$AGENT_IGNORE_FEEDBACK_USERS" --arg clean "$AGENT_CLEAN_REVIEW_USER" \
     --arg assoc "$AGENT_TRUSTED_ASSOCIATIONS" --arg users "$AGENT_TRUSTED_USERS" "$JQ_TRUSTED"'
@@ -384,14 +385,15 @@ base_merged_prs() { # last_green_sha head_sha
 }
 
 # Is the latest review or comment of a login on a PR clean, i.e. a "No issues found" like AGENT_CLEAN_REVIEW_USER's, and
-# newer than the PR's head commit? (A review that predates the latest commit does not cover the code that would be merged.)
+# newer than the PR's head commit? (A review that predates the latest commit does not cover the code that would be merged.
+# A comment is as new as its last edit, so a sticky comment updated after the last push counts.)
 review_is_clean() { # pr head_sha login
   local r date
   r=$(gh_repo)
   date=$(gh api "repos/$r/commits/$2" --jq .commit.committer.date 2>/dev/null) && [ -n "$date" ] || return 1
   {
-    gh api --paginate "repos/$r/issues/$1/comments" --jq '.[] | {u: .user.login, t: .created_at, b: (.body // "")}'
-    gh api --paginate "repos/$r/pulls/$1/comments" --jq '.[] | {u: .user.login, t: .created_at, b: (.body // "")}'
+    gh api --paginate "repos/$r/issues/$1/comments" --jq '.[] | {u: .user.login, t: (.updated_at // .created_at), b: (.body // "")}'
+    gh api --paginate "repos/$r/pulls/$1/comments" --jq '.[] | {u: .user.login, t: (.updated_at // .created_at), b: (.body // "")}'
     gh api --paginate "repos/$r/pulls/$1/reviews" --jq '.[] | {u: .user.login, t: .submitted_at, b: (.body // "")}'
   } | jq -s -e --arg u "$3" --arg d "$date" '[.[] | select(.u == $u)] | sort_by(.t) | last
       | select(. != null) | select(.t >= $d) | select(.b | test("No issues found"))' >/dev/null

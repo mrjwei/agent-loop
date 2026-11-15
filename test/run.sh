@@ -67,6 +67,10 @@ case "$*" in
     esac ;;
   "api --paginate repos/o/r/issues/190/comments"* | "api --paginate repos/o/r/issues/90/comments"*) # PR 190, issue 90 (auto-merge tests)
     [ -z "${FAKE_PR90_COMMENT:-}" ] || printf '{"u":"alice","a":"COLLABORATOR","t":"%s","b":"please change x"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    # a sticky comment of the review bot, in the API's own format (so the real --jq expression runs): created before the head
+    # commit (2026-06-01) and updated in place after it
+    [ -z "${FAKE_BOT_BODY:-}" ] || jq -nc --arg b "$FAKE_BOT_BODY" '[{user: {login: "claude[bot]"}, author_association: "NONE",
+      created_at: "2026-05-01T00:00:00Z", updated_at: "2026-07-01T00:00:00Z", body: $b}]' | jq -c "$q"
     case "${FAKE_PR90_BOT:-}" in
       clean) echo '{"u":"rbot","a":"NONE","t":"2026-07-01T00:00:00Z","b":"No issues found."}' ;;
       dirty) echo '{"u":"rbot","a":"NONE","t":"2026-07-01T00:00:00Z","b":"No issues found."}'
@@ -767,6 +771,40 @@ check "init: --no-workflow skips it" 'none' "$([ -e "$T/wf4/$WF" ] && echo prese
 git init -q -b main "$T/wf5"
 init_wf "$T/wf5" --dry-run
 check "init: --dry-run writes no workflow" 'none' "$([ -e "$T/wf5/$WF" ] && echo present || echo none)"
+
+# --- The review workflow template and how the loop reads its comment (#43) ---
+TPL="$ROOT/templates/claude-code-review.yml"
+check "review template: agent-loop's own workflow is the template" '' "$(cmp "$TPL" "$ROOT/.github/workflows/claude-code-review.yml" 2>&1)"
+check "review template: one sticky comment, the bot settings of the loop's own workflow, the runs of before" '1|1|1|1' \
+  "$(grep -c "^          use_sticky_comment: true" "$TPL")|$(grep -c "^          allowed_bots: 'claude'" "$TPL")|$(grep -c 'types: \[opened, synchronize, ready_for_review, reopened\]' "$TPL")|$(grep -c 'claude_code_oauth_token: ' "$TPL")"
+check "review template: the prompt names the blocking kinds, the acceptance check and the two comment formats" '1|1|1|1|1|1' \
+  "$(grep -c 'a bug (wrong behavior' "$TPL")|$(grep -c 'a rule in .CLAUDE.md. that the change breaks' "$TPL")|$(grep -c 'an acceptance criterion that is not met' "$TPL")|$(grep -c 'gh issue view <n>' "$TPL")|$(grep -c '^            No issues found\.$' "$TPL")|$(grep -c '## Blocking findings' "$TPL")"
+check "review template: nits go under Optional, and a blocking comment never says No issues found" '1|1' \
+  "$(grep -c '## Optional' "$TPL" | sed 's/^[2-9]/1/')|$(grep -c 'Never write$' "$TPL")"
+CLEAN_BODY=$'No issues found.\n\n## Optional\n- `lib/x.sh`: a nit, take it or leave it'
+BLOCK_BODY=$'## Blocking findings\n\n1. `lib/x.sh:10`: acceptance criterion "shows the error from docs/spec/errors.md" is not met.\n\n## Optional\n- a nit'
+fb() { FAKE_BOT_BODY=$1 pr_feedback 190 2026-06-01T00:00:00Z | jq length; }
+check "review: a clean comment in the template's format is not feedback; one with a blocking finding is" '0|1' "$(fb "$CLEAN_BODY")|$(fb "$BLOCK_BODY")"
+check "review: review_is_clean recognises the template's clean comment, and not a blocking one" 'clean|not clean|not clean' \
+  "$(FAKE_BOT_BODY=$CLEAN_BODY review_is_clean 190 abc123 'claude[bot]' && echo clean || echo 'not clean')|$(FAKE_BOT_BODY=$BLOCK_BODY review_is_clean 190 abc123 'claude[bot]' && echo clean || echo 'not clean')|$(FAKE_BOT_BODY='' review_is_clean 190 abc123 'claude[bot]' && echo clean || echo 'not clean')"
+check "review: a sticky comment created before the last commit and updated after it counts (updated_at, not created_at)" 'clean|1' \
+  "$(FAKE_BOT_BODY=$CLEAN_BODY review_is_clean 190 abc123 'claude[bot]' && echo clean || echo 'not clean')|$(fb "$BLOCK_BODY")"
+check "review: feedback before the sticky comment's last edit is old" 0 "$(FAKE_BOT_BODY=$BLOCK_BODY pr_feedback 190 2026-08-01T00:00:00Z | jq length)"
+# the loop's auto-merge uses it: a clean sticky comment allows the merge, a blocking one prevents it
+am_fixture "$LAB" MERGEABLE "$GOODC"; echo 'Closes #90' >"$FIX/pr-body-190.txt"
+check "review: AGENT_AUTOMERGE_REQUIRE_REVIEW with the template's comments" '1|0' \
+  "$(AGENT_AUTOMERGE_REQUIRE_REVIEW='claude[bot]' FAKE_BOT_BODY=$CLEAN_BODY am)|$(AGENT_AUTOMERGE_REQUIRE_REVIEW='claude[bot]' FAKE_BOT_BODY=$BLOCK_BODY am)"
+cp "$T/page1.am.orig" "$FIX/page1.json"; cp "$T/page2.am.orig" "$FIX/page2.json"; cp "$T/prs.am.orig" "$FIX/prs.json"; rm -f "$FIX/pr-body-190.txt"
+# agent-loop init writes the template, and --force replaces a workflow that is there
+WF=.github/workflows/claude-code-review.yml
+git init -q -b main "$T/proj4"
+AGENT_REPO="$T/proj4" "$ROOT/bin/agent-loop" init --no-labels >/dev/null 2>&1
+check "init: the review workflow it writes is the template" same "$(cmp -s "$TPL" "$T/proj4/$WF" && echo same || echo different)"
+echo '# my own review workflow' >"$T/proj4/$WF"
+AGENT_REPO="$T/proj4" "$ROOT/bin/agent-loop" init --no-labels >/dev/null 2>&1
+check "init: leaves an existing workflow that does not use claude-code-action alone" '# my own review workflow' "$(cat "$T/proj4/$WF")"
+AGENT_REPO="$T/proj4" "$ROOT/bin/agent-loop" init --no-labels --force >/dev/null 2>&1
+check "init --force: replaces it with the template" same "$(cmp -s "$TPL" "$T/proj4/$WF" && echo same || echo different)"
 
 # --- CLI ---
 check "cli: version" "$(cat "$ROOT/VERSION")" "$("$ROOT/bin/agent-loop" version)"
