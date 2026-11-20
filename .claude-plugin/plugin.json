@@ -1,0 +1,11 @@
+{
+  "name": "agent-loop",
+  "description": "Issue-to-PR workflows for Claude Code sessions you supervise: implement an issue with an acceptance-criteria trail, address PR feedback, turn plans into issues, hand low-risk issues to the background loop, and turn recurring lessons into project rules.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Jesse Wei"
+  },
+  "homepage": "https://github.com/mrjwei/agent-loop",
+  "repository": "https://github.com/mrjwei/agent-loop",
+  "keywords": ["github", "issues", "pull-requests", "workflow", "review"]
+}

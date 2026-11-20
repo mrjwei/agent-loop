@@ -1,0 +1,16 @@
+{
+  "name": "agent-loop",
+  "owner": {
+    "name": "Jesse Wei"
+  },
+  "metadata": {
+    "description": "agent-loop: issue-to-PR workflows for Claude Code, supervised or in the background."
+  },
+  "plugins": [
+    {
+      "name": "agent-loop",
+      "source": "./",
+      "description": "Issue-to-PR workflows for supervised Claude Code sessions, plus the verify hook and an acceptance reviewer."
+    }
+  ]
+}

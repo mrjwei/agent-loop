@@ -89,13 +89,18 @@ resolve() { # number or ref -> number (empty if it cannot be resolved)
     *) echo "$1" ;;
   esac
 }
-subst_refs() { # replace {{ref}} in a body with the issue number
+subst_refs() { # replace {{ref}} in a body with #<issue number> (a # the model wrote before it, as in #{{ref}}, is dropped)
   local text=$1 f k
   for f in "$tmp"/ref-*; do
     [ -f "$f" ] || continue
     k=${f##*/ref-}
     text=$(T_X="#$(cat "$f")" K="{{$k}}" awk 'BEGIN { k = ENVIRON["K"]; v = ENVIRON["T_X"] }
-      { line = $0; out = ""; while ((i = index(line, k)) > 0) { out = out substr(line, 1, i - 1) v; line = substr(line, i + length(k)) } print out line }' <<<"$text")
+      { line = $0; out = ""
+        while ((i = index(line, k)) > 0) {
+          pre = substr(line, 1, i - 1); if (substr(pre, length(pre)) == "#") pre = substr(pre, 1, length(pre) - 1)
+          out = out pre v; line = substr(line, i + length(k))
+        }
+        print out line }' <<<"$text")
   done
   printf '%s' "$text"
 }
@@ -178,7 +183,7 @@ jq -c ".structured_output.actions[:$AGENT_TRIAGE_MAX_ACTIONS][]" "$out" | while 
         args+=(--body-file "$tmp/body-$num")
       fi
       add=$(echo "$a" | jq -r '.add_labels[]?' | filter_labels)
-      rem=$(echo "$a" | jq -r '.remove_labels[]?' | grep -vx -e "$L_HUMAN" -e "$L_WIP" -e "$L_BLOCKED" -e "$L_AUTOMERGE" || true)
+      rem=$(echo "$a" | jq -r '.remove_labels[]?' | grep -vx -e "$L_HUMAN" -e "$L_WIP" -e "$L_BLOCKED" -e "$L_AUTOMERGE" -e "$L_RISK_HIGH" || true)
       if [ "$cur_human" = true ] || echo "$add" | grep -qx "$L_HUMAN"; then
         echo "$add" | grep -qx "$L_OK" && log "  not adding $L_OK to a $L_HUMAN issue"
         add=$(echo "$add" | grep -vx "$L_OK" || true)

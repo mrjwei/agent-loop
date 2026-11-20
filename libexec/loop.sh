@@ -4,7 +4,8 @@
 #                after its PR was merged or closed loses agent-ok, so the same work does not start again
 #      Resume:   an agent-blocked issue answered by a trusted author loses agent-blocked (AGENT_AUTO_RESUME)
 #      Base check: while checks fail on the head of origin/<base>, step 4 does not start agents (an issue is opened once)
-#      Auto-merge: the loop merges the PR of an agent-automerge issue when every condition holds (AGENT_AUTOMERGE)
+#      Auto-merge: the loop merges the PR of an agent-automerge issue, or (AGENT_AUTOMERGE_POLICY=risk) a low-risk PR, when
+#                  every condition holds (AGENT_AUTOMERGE); AGENT_AUTOMERGE_POLICY=shadow only comments what risk would do
 #   2. Fix:      for an agent PR with a conflict, a failing check or new review feedback, run work.sh --fix
 #   3. Triage:   when nothing is ready to start and the base branch moved since the last triage, run triage.sh
 #   4. Start:    run work.sh in parallel for issues that are agent-ok with all dependencies closed, up to the free slots
@@ -132,7 +133,7 @@ phase_cleanup() {
     fi
   done
   run git -C "$REPO" worktree prune
-  [ "$DRY" = 1 ] || find "$STATE/logs" -type f -mtime +"$AGENT_LOG_DAYS" -delete 2>/dev/null || true
+  [ "$DRY" = 1 ] || find "$STATE/logs" "$STATE/pr-files" -type f -mtime +"$AGENT_LOG_DAYS" -delete 2>/dev/null || true
 }
 
 # An agent-blocked issue whose block comment was answered by a trusted author resumes: the loop removes the label (in
@@ -235,26 +236,76 @@ automerge_blocker() { # pr_json -> why the loop may not merge this PR now (nothi
   return 0
 }
 
+# --- Auto-merge policy and the risk of a PR ---
+# AGENT_AUTOMERGE_POLICY: label (the PR of an issue a person labeled agent-automerge), shadow (as label, and each agent PR gets
+# one comment per head commit saying what `risk` would do), risk (as label, and a low-risk PR merges without the label).
+# A high-risk path, a PR whose files cannot be read, or risk:high on the issue stops even a labeled PR, in every policy.
+automerge_policy() { case "$AGENT_AUTOMERGE_POLICY" in label | shadow | risk) echo "$AGENT_AUTOMERGE_POLICY" ;; *) echo label ;; esac; }
+
+# Facts about the risk of a PR (see diff_risk): L:<lines>, H:<hard reason>, S:<soft reason>
+pr_risk_report() { # pr head issue
+  local files
+  if has_label "$ISSUES_JSON" "$3" "$L_RISK_HIGH"; then echo "H:the issue is labeled $L_RISK_HIGH"; fi
+  if files=$(pr_changed_files "$1" "$2"); then printf '%s\n' "$files" | diff_risk
+  else echo "H:the changed files could not be read"; fi
+}
+report_part() { printf '%s\n' "$1" | sed -n "s/^$2://p"; }   # report, H|S|L -> those lines
+
+# Nothing left to wait for: no run in progress, every check finished, mergeability known. (Before that, the verdict of a
+# shadow comment could still change within the same head commit, and a comment is made once per head commit.)
+pr_settled() { # pr_json
+  is_running "$(echo "$1" | jq -r .issue)" && return 1
+  [ "$(echo "$1" | jq -r .mergeable)" != UNKNOWN ] || return 1
+  echo "$1" | jq -e 'all(.checks[]; .status == "COMPLETED")' >/dev/null
+}
+
+shadow_comment() { # pr_json text: one comment per head commit and PR
+  local n pr head
+  n=$(echo "$1" | jq -r .issue); pr=$(echo "$1" | jq -r .pr); head=$(echo "$1" | jq -r .head)
+  [ "$(stamp_get shadow "$n" "")" != "$head" ] || return 0
+  run gh pr comment "$pr" --body "$AGENT_MARKER Auto-merge policy \`shadow\`, commit ${head:0:7}: $2" >/dev/null || return 0
+  [ "$DRY" = 1 ] || stamp_set shadow "$n" "$head"
+}
+
 phase_automerge() {
-  local p n pr head why cc
+  local p n pr head policy labeled report hard soft blocker why basis lines cc
   [ "$AGENT_AUTOMERGE" = 1 ] || return 0
   case "$AGENT_AUTOMERGE_METHOD" in squash | merge | rebase) ;; *) log "AGENT_AUTOMERGE_METHOD must be squash, merge or rebase: not merging"; return 0 ;; esac
+  policy=$(automerge_policy)
+  [ "$policy" = "$AGENT_AUTOMERGE_POLICY" ] || log "AGENT_AUTOMERGE_POLICY must be label, shadow or risk (not '$AGENT_AUTOMERGE_POLICY'): using label"
   while IFS= read -r p <&3; do
     n=$(echo "$p" | jq -r .issue); pr=$(echo "$p" | jq -r .pr); head=$(echo "$p" | jq -r .head)
-    has_label "$ISSUES_JSON" "$n" "$L_AUTOMERGE" || continue
-    why=$(automerge_blocker "$p")
+    labeled=0
+    if has_label "$ISSUES_JSON" "$n" "$L_AUTOMERGE"; then labeled=1; fi
+    # In the label policy a PR without the label is not looked at: its diff is not even read
+    if [ "$policy" = label ] && [ "$labeled" = 0 ]; then continue; fi
+    issue_open "$n" || continue
+    report=$(pr_risk_report "$pr" "$head" "$n")
+    hard=$(report_part "$report" H); soft=$(report_part "$report" S); lines=$(report_part "$report" L)
+    blocker=$(automerge_blocker "$p")
+    if [ "$policy" = shadow ] && pr_settled "$p"; then
+      why=$(printf '%s\n%s\n%s\n' "$hard" "$soft" "$blocker" | join_lines)
+      if [ -z "$why" ]; then shadow_comment "$p" "would merge automatically (low-risk: $lines changed lines, no high-risk path, no test removed, every other condition holds)."
+      else shadow_comment "$p" "needs a person: $why."; fi
+    fi
+    # What stops this PR. A labeled PR is stopped by a hard reason or a blocker; an unlabeled one (policy risk) also by a soft reason.
+    if [ "$labeled" = 1 ]; then why=$(printf '%s\n%s\n' "$hard" "$blocker" | join_lines)
+    elif [ "$policy" = risk ]; then why=$(printf '%s\n%s\n%s\n' "$hard" "$soft" "$blocker" | join_lines)
+    else continue; fi
     if [ -n "$why" ]; then
       # say it once per reason, not every round
       if [ "$(stamp_get automerge-why "$n" "")" != "$why" ]; then
-        log "#$n: PR #$pr is not merged automatically: $why"
+        log "#$n: PR #$pr is not merged automatically (policy $policy): $why"
         [ "$DRY" = 1 ] || stamp_set automerge-why "$n" "$why"
       fi
       continue
     fi
+    if [ "$labeled" = 1 ]; then basis="#$n is labeled \`$L_AUTOMERGE\`"
+    else basis="the PR is low-risk ($lines changed lines, no high-risk path, no test removed)"; fi
     if run gh pr merge "$pr" "--$AGENT_AUTOMERGE_METHOD" --match-head-commit "$head" >/dev/null; then
-      log "#$n: merged PR #$pr automatically ($AGENT_AUTOMERGE_METHOD)"
+      log "#$n: merged PR #$pr automatically ($AGENT_AUTOMERGE_METHOD, policy $policy: $basis)"
       cc=$(mention)
-      run gh pr comment "$pr" --body "$AGENT_MARKER Merged automatically ($AGENT_AUTOMERGE_METHOD): #$n is labeled \`$L_AUTOMERGE\`, the PR was mergeable, every check had passed, no feedback was waiting for a fix run, and it closes #$n.${AGENT_AUTOMERGE_REQUIRE_REVIEW:+ The latest review of $AGENT_AUTOMERGE_REQUIRE_REVIEW was clean.}${cc:+ $cc}" >/dev/null || true
+      run gh pr comment "$pr" --body "$AGENT_MARKER Merged automatically ($AGENT_AUTOMERGE_METHOD). Policy \`$policy\`: $basis, no changed file is on a high-risk path, the PR was mergeable, every check had passed, no feedback was waiting for a fix run, and it closes #$n.${AGENT_AUTOMERGE_REQUIRE_REVIEW:+ The latest review of $AGENT_AUTOMERGE_REQUIRE_REVIEW was clean.}${cc:+ $cc}" >/dev/null || true
       notify "PR merged (#$n)" "PR #$pr was merged automatically ($AGENT_AUTOMERGE_METHOD)" "$(pr_url "$pr")"
       [ "$DRY" = 1 ] || rm -f "$STATE/stamp/automerge-why-$n"
       # it is merged: the rest of this round must not start a fix run for it
@@ -405,7 +456,12 @@ do_tick() {
 }
 
 show_status() {
-  local f n failing why
+  local f n failing why p report risk me
+  ISSUES_JSON=$(mktemp "$STATE/status-issues.XXXXXX") PRS_JSON=$(mktemp "$STATE/status-prs.XXXXXX")
+  PRFILES=$(mktemp "$STATE/status-prfiles.XXXXXX") PRFILES_BUILT=0
+  trap 'rm -f "$ISSUES_JSON" "$PRS_JSON" "$PRFILES"' EXIT
+  me=$(gh_user)
+  echo "== Acting as GitHub user ${me:-(unknown: is gh authenticated?)}$(if [ -n "$me" ] && same_login "$me" "$AGENT_NOTIFY_USER"; then echo ' (this is AGENT_NOTIFY_USER: its mentions will not notify you)'; fi)"
   paused && echo "== Paused by a usage limit until $(fmt_epoch "$(paused_until)") (resume now: agent-loop unpause)"
   failing=$(base_failing_names)
   [ -z "$failing" ] || echo "== Checks are failing on $BASE_REF ($failing): no agent starts until they pass"
@@ -417,16 +473,17 @@ show_status() {
     n=$(basename "$f" .pid)
     kill -0 "$(cat "$f")" 2>/dev/null && echo "#$n pid $(cat "$f")  latest log: $(ls -t "$STATE"/logs/issue-"$n"-*.log 2>/dev/null | head -1)"
   done
-  echo "== Agent PRs"
-  agent_prs | jq -r '.[] | "PR #\(.pr) <- #\(.issue)  mergeable=\(.mergeable)  checks=\([.checks[] | .conclusion // .status] | group_by(.) | map("\(.[0])x\(length)") | join(" "))"'
+  issues_snapshot >"$ISSUES_JSON"; agent_prs >"$PRS_JSON"
+  echo "== Agent PRs (auto-merge policy: $(automerge_policy))"
+  while IFS= read -r p <&3; do
+    echo "$p" | jq -r '"PR #\(.pr) <- #\(.issue)  mergeable=\(.mergeable)  checks=\([.checks[] | .conclusion // .status] | group_by(.) | map("\(.[0])x\(length)") | join(" "))"' | tr -d '\n'
+    report=$(pr_risk_report "$(echo "$p" | jq -r .pr)" "$(echo "$p" | jq -r .head)" "$(echo "$p" | jq -r .issue)")
+    risk=$(printf '%s\n%s\n' "$(report_part "$report" H)" "$(report_part "$report" S)" | join_lines)
+    if [ -z "$risk" ]; then echo "  risk=low ($(report_part "$report" L) changed lines)"; else echo "  risk=high: $risk"; fi
+  done 3< <(jq -c '.[]' "$PRS_JSON")
   echo "== Blocked (${L_BLOCKED})"
   gh issue list --label "$L_BLOCKED" --json number,title -q '.[] | "#\(.number) \(.title)"'
   echo "== Ready to start (${L_OK}, dependencies closed)"
-  ISSUES_JSON=$(mktemp "$STATE/status-issues.XXXXXX") PRS_JSON=$(mktemp "$STATE/status-prs.XXXXXX")
-  trap 'rm -f "$ISSUES_JSON" "$PRS_JSON"' EXIT
-  issues_snapshot >"$ISSUES_JSON"; agent_prs >"$PRS_JSON"
-  PRFILES=$(mktemp "$STATE/status-prfiles.XXXXXX") PRFILES_BUILT=0
-  trap 'rm -f "$ISSUES_JSON" "$PRS_JSON" "$PRFILES"' EXIT
   STARTED_NOW=""
   ensure_pr_files
   for n in $(candidates); do
