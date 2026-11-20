@@ -255,6 +255,14 @@ echo '{}' | AGENT_LOOP_RUN=1 AGENT_VERIFY_CMD=false hook; check "verify-hook: pr
 printf "AGENT_VERIFY_CMD=false\n" >"$T/proj/.agent-loop.conf"
 echo '{}' | env -u AGENT_VERIFY_CMD "$B" -c 'cd "$1" && CLAUDE_PROJECT_DIR="$1" "$2" "$3/libexec/verify-hook.sh"' _ "$T/proj" "$B" "$ROOT" 2>/dev/null
 check "verify-hook: project copy reads .agent-loop.conf" 2 $?
+echo '{}' | env -u AGENT_VERIFY_CMD "$B" -c 'cd "$1" && CLAUDE_PROJECT_DIR="$1" "$2" "$3/libexec/verify-hook.sh" --plugin' _ "$T/proj" "$B" "$ROOT" 2>/dev/null
+check "verify-hook: plugin reads .agent-loop.conf" 2 $?
+mkdir -p "$T/proj/.claude/hooks" && : >"$T/proj/.claude/hooks/agent-loop-verify.sh"
+echo '{}' | AGENT_VERIFY_CMD=false hook --plugin; check "verify-hook: plugin steps aside for the project's own copy" 0 $?
+rm -rf "$T/proj/.claude/hooks"
+check "plugin: hooks.json runs verify-hook.sh --plugin" 'bash "${CLAUDE_PLUGIN_ROOT}/libexec/verify-hook.sh" --plugin' \
+  "$(jq -r '.hooks.Stop[0].hooks[0].command' "$ROOT/hooks/hooks.json")"
+check "plugin: plugin.json version matches VERSION" "$(cat "$ROOT/VERSION")" "$(jq -r .version "$ROOT/.claude-plugin/plugin.json")"
 rm -f "$T/proj/new.txt" "$T/proj/.agent-loop.conf"
 echo '{}' | AGENT_VERIFY_CMD=false hook --loop; check "verify-hook: nothing changed, nothing to verify" 0 $?
 
