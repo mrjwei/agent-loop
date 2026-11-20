@@ -1,15 +1,17 @@
 # agent-loop
 
-An autonomous issue-to-PR loop driven by headless [Claude Code](https://claude.com/claude-code). Run it in a project's git checkout and it:
+Issue-to-PR workflows on [Claude Code](https://claude.com/claude-code), used two ways (see "Two ways to use it"): as a **Claude Code plugin** in sessions you supervise, which is the default, and as a **background loop** on headless `claude -p` for issues that are decided, self-contained and checkable.
+
+Run in a project's git checkout, the background loop:
 
 1. cleans up the worktrees and branches of merged or closed PRs,
 2. fixes agent PRs that have merge conflicts, failing checks or new review feedback,
 3. optionally compares your plan files with the GitHub issues and keeps them in sync (triage),
 4. starts agents in parallel for issues labeled `agent-ok` whose dependencies are closed, each in its own git worktree, ending in a PR.
 
-You do two things: **merge PRs** and **answer blocked issues**. Merging a PR closes the dependency of the issues waiting on it, so the next round starts them. AI cost only accrues while an agent runs.
+With the loop, you do two things: **merge PRs** and **answer blocked issues**. Merging a PR closes the dependency of the issues waiting on it, so the next round starts them. AI cost only accrues while an agent runs.
 
-It is a set of bash scripts (macOS bash 3.2 compatible) around `claude -p`, `gh`, `git` and `jq`.
+The loop is a set of bash scripts (macOS bash 3.2 compatible) around `claude -p`, `gh`, `git` and `jq`; the plugin is skills, an agent and a hook in the same repository.
 
 ## Two ways to use it
 
@@ -86,7 +88,7 @@ Then:
 2. Write the project rules in `.agent-loop/prompts/project.md`.
 3. Commit `.agent-loop.conf` and `.agent-loop/` so teammates share them (the loop reads them from the main checkout).
 4. Try it without cost or changes: `agent-loop start --once --dry-run --no-triage`
-5. Label one small, well-specified issue `agent-ok`, then run `agent-loop start --no-triage`.
+5. Label one small, well-specified issue `agent-ok` (the plugin's `delegate-issue` skill checks it is ready first), then run `agent-loop start --no-triage`.
 
 ## Commands
 
@@ -293,6 +295,8 @@ The agents get three prompts: `implement`, `fix` and `triage` (in `prompts/`). T
 - **`project.md`** is inserted into all three prompts under "Project rules". Use it for commit style, documents to update, what needs a human, issue conventions. HTML comments in it are stripped.
 - **`implement.md`, `fix.md`, `triage.md`** replace the packaged prompt entirely. Placeholders: `{{N}} {{BRANCH}} {{WT}} {{PR}} {{BASE}} {{LANGUAGE}} {{TRUSTED}} {{VERIFY}} {{MARKER}} {{RESUME}} {{REASONS}} {{PLANS}} {{MAX}} {{PROJECT}}` (not every placeholder is set in every prompt).
 
+The plugin's skills (`skills/`) carry their own copies of the conventions in these prompts (acceptance-criteria evidence, `Closes` / `Refs`, `Depends on:` / `Touches:`, who counts as trusted, the `🤖 agent:` marker). When you change a convention in a prompt, change the matching skill too. `project.md` is read by both.
+
 `examples/acme_work_management/` shows a real configuration: a conf with project-specific allow/deny rules, a `project.md`, and a full `triage.md` override.
 
 ## Safety model
@@ -351,10 +355,14 @@ Everything is under `.git/agent-loop/` (outside version control, shared by all w
 
 ```
 bin/agent-loop        entry point (dispatches to libexec/)
-libexec/              loop.sh  work.sh  triage.sh  init.sh  verify-hook.sh (the Stop hook)
+libexec/              loop.sh  work.sh  triage.sh  init.sh  stats.sh  lessons.sh  verify-hook.sh (the Stop hook)
 lib/common.sh         configuration, GitHub helpers, usage-limit handling
 prompts/              default implement / fix / triage prompts
 templates/            files `init` writes into a project (config, project rules, the review workflow)
+.claude-plugin/       plugin manifest and marketplace entry
+skills/               the plugin's skills (implement-issue, address-pr-feedback, plan-to-issues, delegate-issue, harvest-lessons)
+agents/               the plugin's acceptance-reviewer agent
+hooks/hooks.json      the plugin's Stop hook (runs libexec/verify-hook.sh --plugin)
 examples/             a real project's configuration
 test/run.sh           offline tests (fake gh and claude, no network): `make test`
 Makefile              install / uninstall / test / lint (`make lint` runs shellcheck at warning level, as CI does)
