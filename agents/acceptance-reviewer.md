@@ -36,6 +36,9 @@ named test or the cited lines and check they really show it.
 - A criterion with no evidence is blocking.
 - A criterion marked `not done` is blocking unless the PR uses `Refs #<n>` rather than `Closes #<n>`.
 - Evidence that does not hold (the test is missing, or tests something else) is blocking.
+- A `tried:` note (a command or flow the implementer ran and what it did) is evidence you cannot re-run. Count it when it
+  names what was run and the result fits the criterion, and mark it "observed, not re-run" in the table. A criterion whose
+  only evidence is a vague `tried:` note ("works", "checked it") has no evidence.
 
 If the issue has no acceptance criteria, say so under Optional; do not invent blocking ones.
 

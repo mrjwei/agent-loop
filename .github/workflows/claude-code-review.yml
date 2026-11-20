@@ -66,6 +66,8 @@ jobs:
             - A criterion marked `not done` is a blocking finding unless the PR says `Refs #<n>` and not `Closes #<n>`.
             - A criterion whose evidence does not hold is a blocking finding: the named test does not exist, does not test the
               criterion, or the cited file and lines do not do what is claimed. Open them and check.
+            - A `tried:` note (a command or flow the author ran, and what it did) is evidence you cannot re-run: count it when it
+              names what was run and the result fits the criterion; a vague one ("works") is no evidence.
             If the issue has no acceptance criteria, say so under "Optional" and do not invent blocking ones.
 
             ## Your comment

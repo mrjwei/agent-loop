@@ -33,7 +33,9 @@ Work in the PR's branch (its worktree if one exists: `git worktree list`).
   changed notes or documents, keep the facts from both. Never rebase or force-push a pushed branch.
 - **Failing checks**: reproduce locally and fix the cause. Change the test only if the test is wrong, and say so.
 - **Feedback**: make the changes you agreed with.
-- Run the project's checks before pushing, then `git push`.
+- Run the project's checks before pushing. When a fix changed behavior (not only tests or docs), try the affected flow
+  again, as in `implement-issue` step 4 (Claude Code's built-in `verify` skill when it is available to you, otherwise
+  drive it directly), and note what you saw. Then `git push`.
 
 ## 4. Keep the trail honest
 
