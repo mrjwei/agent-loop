@@ -33,10 +33,20 @@ for a in "$@"; do case "$prev" in -q | --jq) q=$a ;; esac; prev=$a; done
 case "$*" in
   "repo view --json viewerPermission"*) printf '{"viewerPermission":"%s"}\n' "${FAKE_PERM:-WRITE}" | jq -r "$q" ;;
   "repo view"*) echo "o/r" ;;
-  "auth status"*) ;;
+  "auth status"*) [ -z "${FAKE_GH_NOAUTH:-}" ] || exit 1 ;;
   "api user"*) echo "${FAKE_GH_USER:-me}" ;;
   "api --paginate repos/o/r/pulls/"*"/files"*) # the changed files of PR n, in the REST format, from $FIX/pr-api-files-<n>.json
     n=${3#repos/o/r/pulls/}; n=${n%%/*}; if [ -f "$FIX/pr-api-files-$n.json" ]; then jq -c "$q" "$FIX/pr-api-files-$n.json"; fi ;;
+  "api repos/o/r/rules/branches/"*) [ -z "${FAKE_RULES_FAIL:-}" ] || exit 1; echo "${FAKE_RULES:-[]}" ;;
+  "api repos/o/r/branches/"*"/protection"*) # FAKE_PROTECTION: pr (default) | nopr | none | denied
+    case "${FAKE_PROTECTION:-pr}" in
+      pr) echo '{"required_pull_request_reviews":{"required_approving_review_count":0}}' ;;
+      nopr) echo '{"required_status_checks":{"strict":false}}' ;;
+      none) echo '{"message":"Branch not protected","status":"404"}'; echo 'gh: Branch not protected (HTTP 404)' >&2; exit 1 ;;
+      *) echo '{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature.","status":"403"}'
+         echo 'gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)' >&2; exit 1 ;;
+    esac ;;
+  "secret list"*) [ -z "${FAKE_SECRETS_FAIL:-}" ] || exit 1; for s in ${FAKE_SECRETS-CLAUDE_CODE_OAUTH_TOKEN}; do echo "$s"; done ;;
   "pr list --head "*) # --head <branch> --state <state>
     jq --arg b "$4" --arg s "$6" '[.[] | select(.headRefName == $b and ($s == "all" or (.state | ascii_downcase) == $s))]' "$FIX/prs.json" | jq -r "$q" ;;
   "pr view "*" --json body"*) f="$FIX/pr-body-$3.txt"; if [ -f "$f" ]; then cat "$f"; fi ;;
@@ -49,7 +59,8 @@ case "$*" in
   "pr list --state open"*) jq '[.[] | select(.state == "OPEN")]' "$FIX/prs.json" | jq -r "$q" ;;
   "issue list --state closed"*) echo '[]' ;;
   "issue list --label"*) echo '[]' | jq -r "$q" ;;
-  "label list"*) [ -z "${FAKE_LABELS_NONE:-}" ] || { echo '[]' | jq -r "$q"; exit 0; }
+  "label list"*) if [ -n "${FAKE_LABELS:-}" ]; then for l in $FAKE_LABELS; do jq -nc --arg n "$l" '{name: $n}'; done | jq -sc . | jq -r "$q"; exit 0; fi
+                 [ -z "${FAKE_LABELS_NONE:-}" ] || { echo '[]' | jq -r "$q"; exit 0; }
                  if [ -n "${FAKE_LABELS_NO_RISK:-}" ]; then risk=''; else risk=',{"name":"risk:high"}'; fi
                  echo '[{"name":"agent-ok"},{"name":"agent-wip"},{"name":"agent-blocked"},{"name":"human"},{"name":"bug"},{"name":"agent-automerge"}'"$risk]" | jq -r "$q" ;;
   "issue edit"*) echo "$*" >>"$GH_LOG"   # keep a --body-file's text: triage deletes the file when it ends
@@ -1030,6 +1041,104 @@ out=$(FAKE_GH_USER=my-bot "$B" "$ROOT/libexec/loop.sh" --status 2>&1 | head -1)
 check "status: shows which account the loop acts as" '== Acting as GitHub user my-bot' "$out"
 out=$(AGENT_NOTIFY_USER=my-bot FAKE_GH_USER=My-Bot "$B" "$ROOT/libexec/loop.sh" --status 2>&1 | head -1)
 check "status: and says when that is AGENT_NOTIFY_USER" '== Acting as GitHub user My-Bot (this is AGENT_NOTIFY_USER: its mentions will not notify you)' "$out"
+# --- agent-loop ready (#47) ---
+git clone -q "$T/origin.git" "$T/rd" 2>/dev/null
+git -C "$T/rd" remote set-head origin main >/dev/null
+RDCONF="$T/rd/.agent-loop.conf"
+conf() { printf '%s\n' "AGENT_VERIFY_CMD='test -f docs/plans/p.md'" "AGENT_SETUP_CMD='true'" "$@" >"$RDCONF"; }
+rdy() { (cd "$T/rd" && AGENT_REPO="$T/rd" "$ROOT/bin/agent-loop" ready "$@" 2>/dev/null </dev/null); }
+rst() { rdy --json | jq -r --arg id "$1" '.[] | select(.id == $id) | .status'; }   # the status of one check
+rmsg() { rdy --json | jq -r --arg id "$1" '.[] | select(.id == $id) | .message'; }
+conf
+out=$(rdy); rc=$?
+check "ready: a project that is ready passes every check and exits 0" '0|pass' "$rc|$(rdy --json | jq -r '[.[].status] | unique | join(",")')"
+check "ready: the text output ends with a summary" 1 "$(echo "$out" | grep -c '^ready: 11 passed, 0 warning(s), 0 failed$')"
+check "ready: --json is an array of checks with id, status, message and fix" 'array|11|11' \
+  "$(rdy --json | jq -r 'type')|$(rdy --json | jq 'length')|$(rdy --json | jq '[.[] | select(has("id") and has("status") and has("message") and has("fix"))] | length')"
+
+# doctor: warnings pass through, a missing tool fails (a PATH without claude)
+check "ready: doctor with a warning (gh not authenticated) is a warning" warn "$(FAKE_GH_NOAUTH=1 rst doctor)"
+NOCL="$T/bin-noclaude"; mkdir -p "$NOCL"; ln -sf "$T/bin/gh" "$NOCL/gh"
+for c in bash env git jq sed awk tr grep tail head cat mktemp rm dirname basename sort date mkdir cut printf ls wc cmp diff uname sleep kill ps find tee comm test true false; do
+  command -v "$c" >/dev/null 2>&1 && ln -sf "$(command -v "$c")" "$NOCL/$c"
+done
+out=$(cd "$T/rd" && PATH="$NOCL" AGENT_REPO="$T/rd" "$ROOT/bin/agent-loop" ready --json 2>/dev/null </dev/null); rc=$?
+check "ready: doctor fails when a tool is missing, and the exit status is 1" 'fail|1' "$(echo "$out" | jq -r '.[] | select(.id == "doctor") | .status')|$rc"
+
+# config and verify command
+rm -f "$RDCONF"
+check "ready: no .agent-loop.conf fails, with the fix" 'fail|run: agent-loop init' "$(rst config)|$(rdy --json | jq -r '.[] | select(.id == "config") | .fix')"
+conf; printf "AGENT_VERIFY_CMD=''\n" >>"$RDCONF"
+check "ready: no AGENT_VERIFY_CMD fails, and the clean-checkout check says it did not run" 'fail|warn' "$(rst verify-cmd)|$(rst hermetic-verify)"
+conf
+
+# hermetic verify
+touch "$T/rd/only-local.txt"; conf "AGENT_VERIFY_CMD='test -f only-local.txt'"
+check "ready: a verify command that needs a file that is not on the base branch fails, naming the base branch" 'fail|1' \
+  "$(rst hermetic-verify)|$(rmsg hermetic-verify | grep -c 'clean checkout of origin/main')"
+rm -f "$T/rd/only-local.txt"; conf "AGENT_SETUP_CMD='echo install broke >&2; false'"
+check "ready: a failing AGENT_SETUP_CMD fails, and shows its output" 'fail|1' "$(rst hermetic-verify)|$(rmsg hermetic-verify | grep -c 'install broke')"
+conf "AGENT_VERIFY_CMD='test -n \"\${NPM_TOKEN:-}\"'"
+check "ready: a verify command that needs a credential of AGENT_SCRUB_ENV fails (they are removed, as for the agents)" 'fail|pass' \
+  "$(NPM_TOKEN=secret rst hermetic-verify)|$(NPM_TOKEN=secret AGENT_SCRUB_ENV=NOTHING rst hermetic-verify)"
+conf
+rdy >/dev/null
+check "ready: the temporary worktree is removed afterwards, whatever the result" '1|0' \
+  "$(git -C "$T/rd" worktree list | wc -l | tr -d ' ')|$(ls -d "${TMPDIR:-/tmp}"/agent-loop-ready.* 2>/dev/null | wc -l | tr -d ' ')"
+conf "AGENT_VERIFY_CMD='false'"; rdy >/dev/null
+check "ready: ... also after a failure" '1|0' \
+  "$(git -C "$T/rd" worktree list | wc -l | tr -d ' ')|$(ls -d "${TMPDIR:-/tmp}"/agent-loop-ready.* 2>/dev/null | wc -l | tr -d ' ')"
+conf
+
+# origin/HEAD
+git -C "$T/rd" remote set-head origin -d >/dev/null
+check "ready: origin/HEAD not set fails, with the fix" 'fail|run: git remote set-head origin --auto' \
+  "$(rst origin-head)|$(rdy --json | jq -r '.[] | select(.id == "origin-head") | .fix')"
+git -C "$T/rd" remote set-head origin main >/dev/null
+
+# branch protection
+check "ready: protection requiring a pull request passes" pass "$(rst branch-protection)"
+check "ready: protection that does not require a pull request fails" fail "$(FAKE_PROTECTION=nopr rst branch-protection)"
+check "ready: an unprotected base branch fails" fail "$(FAKE_PROTECTION=none rst branch-protection)"
+check "ready: when GitHub refuses to show protection it is a warning, not a failure" warn "$(FAKE_PROTECTION=denied rst branch-protection)"
+check "ready: a ruleset with a pull_request rule passes even without classic protection" pass \
+  "$(FAKE_PROTECTION=none FAKE_RULES='[{"type":"pull_request"}]' rst branch-protection)"
+check "ready: a ruleset without a pull_request rule does not" fail "$(FAKE_PROTECTION=none FAKE_RULES='[{"type":"deletion"}]' rst branch-protection)"
+
+# labels
+check "ready: missing labels fail, naming them" 'fail|1' \
+  "$(FAKE_LABELS='agent-ok agent-wip human' rst labels)|$(FAKE_LABELS='agent-ok agent-wip human' rmsg labels | grep -c 'agent-blocked, agent-automerge')"
+
+# the Claude workflow: its secret, the review check in AGENT_IGNORE_CHECKS, the review bot for auto-merge
+check "ready: without a Claude workflow no secret and no review settings are needed" 'pass|pass|pass' "$(rst claude-secret)|$(rst review-check)|$(rst automerge-review)"
+mkdir -p "$T/rd/.github/workflows"; cp "$ROOT/templates/claude-code-review.yml" "$T/rd/.github/workflows/claude-code-review.yml"
+check "ready: the secret the Claude workflow reads exists" pass "$(rst claude-secret)"
+check "ready: ... and a missing CLAUDE_CODE_OAUTH_TOKEN fails, naming the fix" 'fail|1' \
+  "$(FAKE_SECRETS='SOMETHING_ELSE' rst claude-secret)|$(FAKE_SECRETS='SOMETHING_ELSE' rdy --json | jq -r '.[] | select(.id == "claude-secret") | .fix' | grep -c 'gh secret set CLAUDE_CODE_OAUTH_TOKEN')"
+check "ready: when gh cannot list secrets it is a warning" warn "$(FAKE_SECRETS_FAIL=1 rst claude-secret)"
+check "ready: the review check is not in AGENT_IGNORE_CHECKS: a warning with the name; in it: pass" 'warn|1|pass' \
+  "$(rst review-check)|$(rdy --json | jq -r '.[] | select(.id == "review-check") | .fix' | grep -c "AGENT_IGNORE_CHECKS='claude-review'")|$(AGENT_IGNORE_CHECKS='test, claude-review' rst review-check)"
+check "ready: a review workflow without AGENT_AUTOMERGE_REQUIRE_REVIEW warns; with it, or with auto-merge off, it passes" 'warn|pass|pass' \
+  "$(rst automerge-review)|$(AGENT_AUTOMERGE_REQUIRE_REVIEW='claude[bot]' rst automerge-review)|$(AGENT_AUTOMERGE=0 rst automerge-review)"
+rm -rf "$T/rd/.github"
+
+# deny rules for projects that can deploy
+check "ready: a project without signs of deploy commands needs no deny rules" pass "$(rst deny-rules)"
+echo '{}' >"$T/rd/vercel.json"
+check "ready: vercel.json and an empty AGENT_EXTRA_DENY: a warning that names the sign and the fix" 'warn|1|1' \
+  "$(rst deny-rules)|$(rmsg deny-rules | grep -c 'vercel.json')|$(rdy --json | jq -r '.[] | select(.id == "deny-rules") | .fix' | grep -c AGENT_EXTRA_DENY)"
+conf 'AGENT_EXTRA_DENY=("Bash(*vercel*)")'
+check "ready: ... and with AGENT_EXTRA_DENY set it passes" pass "$(rst deny-rules)"
+conf; rm -f "$T/rd/vercel.json"
+echo '{"scripts":{"build":"x","deploy:prod":"vercel --prod"}}' >"$T/rd/package.json"
+check "ready: a deploy script in package.json is a sign too" warn "$(rst deny-rules)"
+rm -f "$T/rd/package.json"
+
+# exit status: failures exit 1, warnings alone exit 0, and a failure prints its fix
+FAKE_PROTECTION=none rdy >"$T/ready.out"; rc=$?
+check "ready: a failed check exits 1 and prints its fix" '1|1' "$rc|$(grep -c '^        fix: Settings > Branches' "$T/ready.out")"
+FAKE_PROTECTION=denied rdy >/dev/null; check "ready: warnings alone exit 0" 0 $?
+"$ROOT/bin/agent-loop" ready --nope >/dev/null 2>&1; check "ready: an unknown option is an error" 1 $?
 
 # --- CLI ---
 check "cli: version" "$(cat "$ROOT/VERSION")" "$("$ROOT/bin/agent-loop" version)"

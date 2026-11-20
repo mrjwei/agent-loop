@@ -71,6 +71,7 @@ cd ~/projects/my-project
 agent-loop doctor      # checks the tools above, and which GitHub account the loop acts as
 agent-loop init        # writes .agent-loop.conf, .agent-loop/prompts/project.md, and the labels
                        # (add --plan for the plan template)
+agent-loop ready       # is the project ready for the loop? (verify command, branch protection, labels, secrets, deny rules)
 ```
 
 `init` does the following, and `--dry-run` shows it without changing anything:
@@ -106,6 +107,7 @@ agent-loop lessons [--days N]                          # why agents stopped and 
 agent-loop plan-lint [files...]                        # check plan files (default: AGENT_PLANS_GLOB) for items triage can use; exit 1 on errors
 agent-loop labels                                      # (re)create the labels (including agent-automerge and risk:high)
 agent-loop doctor                                      # check tools, claude CLI options, gh auth and account, base branch
+agent-loop ready [--json]                              # is this project ready for the loop? (see "Is the project ready?"); exit 1 when a check fails
 agent-loop version
 ```
 
@@ -219,6 +221,24 @@ jobs:
 ```
 
 Triage maps the fields to labels: `Size` to `size:s`, `size:m` or `size:l`; `Risk` to `risk:low` or `risk:high`; `Owner: human` to `human`. Let triage create them with `AGENT_AUTOCREATE_LABELS='size:* risk:*'` (`risk:high` is created by `init` and `agent-loop labels`). `risk:high` also keeps the issue's PR from merging automatically (see "Auto-merge"), and triage never removes it: a person does.
+
+### Is the project ready?
+
+"Ready for the loop" is a checklist, and a project that misses one item fails later and expensively. `agent-loop ready` checks it, prints `pass`, `WARN` or `FAIL` for each item with the fix, and exits 1 when anything fails. `--json` prints the results as an array of `{id, status, message, fix}` for other commands to use. It changes nothing on GitHub; its only side effect is a temporary worktree of the base branch, removed again.
+
+| Check (`id`) | Passes when | Otherwise |
+|---|---|---|
+| `doctor` | `agent-loop doctor` finds every tool | fail when a tool is missing; warn when doctor only warns |
+| `config` | `.agent-loop.conf` exists | fail: `agent-loop init` |
+| `verify-cmd` | `AGENT_VERIFY_CMD` is set | fail: without it no agent's work is checked before it opens a PR |
+| `origin-head` | `origin/HEAD` is set | fail: `git remote set-head origin --auto` |
+| `hermetic-verify` | `AGENT_SETUP_CMD` and `AGENT_VERIFY_CMD` pass in a temporary worktree of the base branch, with the credentials of `AGENT_SCRUB_ENV` removed, as for the agents | fail: a verify command that needs a secret fails every agent's Stop hook, whatever the agent wrote. Warn when `AGENT_VERIFY_CMD` is not set |
+| `branch-protection` | a ruleset or branch protection on the base branch requires a pull request | fail when it does not or there is none; warn when GitHub refuses to show it (reading classic protection needs admin rights) |
+| `labels` | the loop's labels exist | fail: `agent-loop labels` |
+| `claude-secret` | every secret a Claude workflow reads (`claude_code_oauth_token` or `anthropic_api_key`, normally `CLAUDE_CODE_OAUTH_TOKEN`) is a repository secret (`gh secret list`; values are never read) | fail with `gh secret set`; warn when the list cannot be read. An organization secret is not listed |
+| `deny-rules` | `AGENT_EXTRA_DENY` has rules, or the project shows no sign of deploy commands (`vercel.json`, `fly.toml`, `netlify.toml`, `serverless.yml`, Terraform files, a `deploy` script in `package.json`, `scripts/deploy*`) | warn: the agents may run those commands |
+| `review-check` | the job name of the Claude review workflow is in `AGENT_IGNORE_CHECKS` | warn: while the review runs or fails to start, the loop starts fix runs for it |
+| `automerge-review` | `AGENT_AUTOMERGE_REQUIRE_REVIEW` names the review bot (or auto-merge is off) when a review workflow exists | warn: an issue labeled `agent-automerge` is merged without waiting for the review |
 
 ### Stats and the daily digest
 
@@ -417,7 +437,7 @@ Everything is under `.git/agent-loop/` (outside version control, shared by all w
 
 ```
 bin/agent-loop        entry point (dispatches to libexec/)
-libexec/              loop.sh  work.sh  triage.sh  init.sh  plan-lint.sh  stats.sh  lessons.sh  verify-hook.sh (the Stop hook)
+libexec/              loop.sh  work.sh  triage.sh  init.sh  plan-lint.sh  ready.sh  stats.sh  lessons.sh  verify-hook.sh (the Stop hook)
 lib/common.sh         configuration, GitHub helpers, usage-limit handling
 prompts/              default implement / fix / triage prompts
 templates/            files `init` writes into a project (config, project rules, the review workflow, plan.md)
