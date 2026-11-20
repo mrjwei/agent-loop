@@ -78,6 +78,7 @@ agent-loop init        # writes .agent-loop.conf, .agent-loop/prompts/project.md
 |---|---|
 | Config | `.agent-loop.conf`, with setup and verify commands guessed from `package.json`, `go.mod`, `Cargo.toml` or a Makefile |
 | Project rules | `.agent-loop/prompts/project.md`, a stub for what an agent cannot guess from the code |
+| Plan template (only with `--plan`) | `docs/plans/TEMPLATE.md`, the plan format triage works best with, checked by `agent-loop plan-lint`: see "Plans" |
 | Stop hook (only with `--hook`) | `.claude/hooks/agent-loop-verify.sh`, merged into `.claude/settings.json`, for people's interactive sessions too. The loop does not need it: every agent run gets the same hook through `--settings`. |
 | Review workflow | `.github/workflows/claude-code-review.yml`, an independent review that blocks only on real findings and checks the acceptance criteria (see "Review workflow"), with `allowed_bots: 'claude'`, because PRs the loop opens run as the `claude[bot]` actor and the action otherwise fails with "Workflow initiated by non-human actor". A workflow that already exists (for example from `/install-github-app`) is kept, and gets the line if it lacks it. Skip with `--no-workflow`. |
 | Labels | `agent-ok`, `agent-wip`, `agent-blocked`, `human`, `agent-automerge`, `risk:high` (skip with `--no-labels`) |
@@ -101,6 +102,7 @@ agent-loop work <issue> [--fix]                        # run a single issue by h
 agent-loop triage [--dry-run]                          # sync issues with plan files
 agent-loop stats [--days N] [--json|--digest]          # outcomes, turns and cost of the finished runs (default 7 days); --digest: a short text for the last 24 hours
 agent-loop lessons [--days N]                          # why agents stopped and what reviewers asked for (default 30 days), newest first
+agent-loop plan-lint [files...]                        # check plan files (default: AGENT_PLANS_GLOB) for items triage can use; exit 1 on errors
 agent-loop labels                                      # (re)create the labels (including agent-automerge and risk:high)
 agent-loop doctor                                      # check tools, claude CLI options, gh auth, base branch
 agent-loop version
@@ -150,7 +152,7 @@ The risk is in the diff, which the loop can read (`gh api repos/<repo>/pulls/<n>
 |---|---|
 | no changed file (nor the old path of a renamed one) matches `AGENT_RISK_PATHS` | globs, space-separated, in the syntax of `Touches:` (`*` also matches `/`, so `**` works). Default: `.github/** .agent-loop/** .agent-loop.conf CLAUDE.md */CLAUDE.md docs/plans/** docs/decisions/**` and, in the root and in subdirectories, `package.json pnpm-lock.yaml package-lock.json yarn.lock pyproject.toml uv.lock requirements*.txt go.mod go.sum Cargo.toml Cargo.lock`. Add your own (migrations, infrastructure, auth, API schemas, UI). Empty means no path is high-risk |
 | at most `AGENT_AUTOMERGE_MAX_LINES` lines changed (additions plus deletions) | default `300` |
-| its issue is not labeled `risk:high` | a person adds it, and only a person removes it |
+| its issue is not labeled `risk:high` | triage adds it from a plan's `Risk: high` (see "Plans"); a person can add it too, and only a person removes it |
 | it deletes no test file (nor renames one to a path that is not a test), and removes no more lines from test files than it adds | test files: `AGENT_TEST_PATHS`, default `test/** tests/** *_test.* *.test.* *.spec.* */test_*.py` |
 | every condition in the list above holds (checks, feedback, `Closes #<n>`, ...) | |
 
@@ -184,6 +186,38 @@ How it fits the loop's settings:
 | `AGENT_CLEAN_REVIEW_USER` (default `claude[bot]`) | The login that posts the comment. A `No issues found` comment from it is not feedback; a comment with blocking findings is, so a fix round starts, and after `AGENT_MAX_FIXES` rounds the issue is blocked. Nits under `## Optional` after a `No issues found.` start nothing. If your comments come from another login (the action posts as `github-actions[bot]` when you give it `github_token`), set this to that login |
 | `AGENT_IGNORE_CHECKS` | Add the job name, `claude-review`: a failed review *job* (an outage, a missing secret) should not start fix runs. The review's findings are the comment, not the job's status |
 | `AGENT_AUTOMERGE_REQUIRE_REVIEW` | Set it to the same login: the loop then merges only when that login's latest comment is clean and newer than the PR's last commit. A review of an older commit does not count |
+
+### Plans
+
+Triage turns plan items into issues and relies on each item being about one PR, with acceptance criteria, dependencies and `human` marks. `agent-loop init --plan` copies `templates/plan.md` to `docs/plans/TEMPLATE.md` (with `status: template`, so triage and `plan-lint` skip it); copy it to `docs/plans/<name>.md` for a real plan. Items have a fixed shape:
+
+```markdown
+### P1-03 Upload a CSV and preview rows
+- Size: S · Risk: low · Owner: agent
+- Depends on: P1-01
+- Touches: app/upload/**, lib/csv/**
+- Acceptance:
+  - [ ] Given a 10 MB CSV, the preview shows the first 50 rows within 2 s
+  - [ ] An invalid file shows the error from docs/spec/errors.md
+```
+
+`agent-loop plan-lint [files...]` (default: the files of `AGENT_PLANS_GLOB`) exits 1 and prints `file:line: message` when an item lacks `Size` (S, M or L), `Risk` (low or high), `Owner` (agent or human) or an `Acceptance` line with at least one criterion, when an id is used twice, or when `Depends on` names an id (`P1-01`; issue numbers such as `#12` are ignored) that no plan defines. Ids are defined by every plan of `AGENT_PLANS_GLOB` plus the files you name. Items are `### <ID> title` headings, where the id is letters, a dash and digits; other headings and fenced code blocks are not items. It is plain bash and awk: no model call, no GitHub, so it runs in CI:
+
+```yaml
+# .github/workflows/plan-lint.yml
+name: plan-lint
+on:
+  pull_request:
+    paths: ['docs/plans/**']
+jobs:
+  plan-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git clone --depth 1 https://github.com/mrjwei/agent-loop /tmp/agent-loop && /tmp/agent-loop/bin/agent-loop plan-lint docs/plans/*.md
+```
+
+Triage maps the fields to labels: `Size` to `size:s`, `size:m` or `size:l`; `Risk` to `risk:low` or `risk:high`; `Owner: human` to `human`. Let triage create them with `AGENT_AUTOCREATE_LABELS='size:* risk:*'` (`risk:high` is created by `init` and `agent-loop labels`). `risk:high` also keeps the issue's PR from merging automatically (see "Auto-merge"), and triage never removes it: a person does.
 
 ### Stats and the daily digest
 
@@ -227,7 +261,8 @@ The value is comma-separated globs (`*`, `?`, `[...]`; a `*` also matches `/`, s
 | `agent-blocked` | The agent stopped; the reason is in an issue comment | the loop. **Your answer in a comment is enough**: the next round removes it and work resumes (removing it by hand works too, and is needed with `AGENT_AUTO_RESUME=0`) |
 | `human` | Work only a person can do; `agent-ok` is never added | you, or triage |
 | `agent-automerge` | The loop merges this issue's PR itself once every condition in "Auto-merge" holds | **you only**. Triage never adds or removes it, and the agents cannot change labels |
-| `risk:high` | The PR of this issue is never merged automatically, whatever the policy and the label | you; **only you remove it** |
+| `risk:high` | The PR of this issue is never merged automatically, whatever the policy and the label | triage (from a plan's `Risk: high`) or you; **only you remove it** |
+| `size:s`, `size:m`, `size:l`, `risk:low` | A plan item's Size and Risk, recorded on its issue (nothing in the loop reads them yet) | triage, when `AGENT_AUTOCREATE_LABELS` allows `size:* risk:*` |
 
 ### What you do
 
@@ -249,7 +284,7 @@ The value is comma-separated globs (`*`, `?`, `[...]`; a `*` also matches `/`, s
 | `AGENT_PROMPTS_DIR` | `.agent-loop/prompts` | Project prompt overrides (relative to the repo root) |
 | `AGENT_PLANS_GLOB` | empty (triage off) | Plan files for triage, e.g. `docs/plans/*.md` |
 | `AGENT_PLANS_ACTIVE_REGEX` | `^status: active` | A plan counts as active when a line matches (empty = all) |
-| `AGENT_AUTOCREATE_LABELS` | empty | Globs of labels triage may create, e.g. `phase:*` |
+| `AGENT_AUTOCREATE_LABELS` | empty | Globs of labels triage may create, e.g. `phase:*`. For plans in the template form: `'size:* risk:*'` |
 | `AGENT_MODEL` / `AGENT_EFFORT` | `claude-sonnet-5-5` / `high` | Implement and fix agents |
 | `AGENT_ESCALATE_MODEL` / `AGENT_ESCALATE_EFFORT` | empty (off) | Model and effort for the last implement attempt (`AGENT_MAX_ATTEMPTS`) and the last fix round (`AGENT_MAX_FIXES`), instead of `AGENT_MODEL` / `AGENT_EFFORT`. Each one falls back to the normal value when empty. No extra run: the same number of attempts happens, the last with the stronger model |
 | `AGENT_TRIAGE_MODEL` / `AGENT_TRIAGE_EFFORT` | `claude-opus-5-5` / `high` | Triage agent |
@@ -355,10 +390,10 @@ Everything is under `.git/agent-loop/` (outside version control, shared by all w
 
 ```
 bin/agent-loop        entry point (dispatches to libexec/)
-libexec/              loop.sh  work.sh  triage.sh  init.sh  stats.sh  lessons.sh  verify-hook.sh (the Stop hook)
+libexec/              loop.sh  work.sh  triage.sh  init.sh  plan-lint.sh  stats.sh  lessons.sh  verify-hook.sh (the Stop hook)
 lib/common.sh         configuration, GitHub helpers, usage-limit handling
 prompts/              default implement / fix / triage prompts
-templates/            files `init` writes into a project (config, project rules, the review workflow)
+templates/            files `init` writes into a project (config, project rules, the review workflow, plan.md)
 .claude-plugin/       plugin manifest and marketplace entry
 skills/               the plugin's skills (implement-issue, address-pr-feedback, plan-to-issues, delegate-issue, harvest-lessons)
 agents/               the plugin's acceptance-reviewer agent

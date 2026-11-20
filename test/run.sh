@@ -915,6 +915,84 @@ AGENT_REPO="$T/proj4" "$ROOT/bin/agent-loop" init --no-labels >/dev/null 2>&1
 check "init: leaves an existing workflow that does not use claude-code-action alone" '# my own review workflow' "$(cat "$T/proj4/$WF")"
 AGENT_REPO="$T/proj4" "$ROOT/bin/agent-loop" init --no-labels --force >/dev/null 2>&1
 check "init --force: replaces it with the template" same "$(cmp -s "$TPL" "$T/proj4/$WF" && echo same || echo different)"
+# --- Plan template and plan-lint (#45) ---
+git init -q -b main "$T/pl"; mkdir -p "$T/pl/docs/plans"
+plint() { (cd "$T/pl" && AGENT_REPO="$T/pl" "$ROOT/bin/agent-loop" plan-lint "$@" 2>&1); }
+cp "$ROOT/templates/plan.md" "$T/pl/docs/plans/ok.md"
+out=$(plint docs/plans/ok.md); rc=$?
+check "plan-lint: the plan template is a valid plan" '0|1' "$rc|$(echo "$out" | grep -c 'plan-lint: 2 item(s) in 1 file(s): ok')"
+cat >"$T/pl/docs/plans/bad.md" <<'PLAN'
+---
+status: active
+---
+# A plan with problems
+
+### P2-01 Nothing at all
+### P2-02 A few fields are wrong
+- Size: XL · Risk: medium · Owner: robot
+- Depends on: P9-99, P1-01, #12
+- Acceptance:
+### P2-03 Fine
+- Size: M · Risk: high · Owner: human
+- Acceptance: one criterion on the same line
+### P2-03 The same id again
+- Size: L · Risk: low · Owner: agent
+- Depends on: P2-03
+- Acceptance:
+  - [ ] a criterion
+
+```
+### P7-01 an example inside a code fence is not an item
+```
+
+### Notes
+plain text, not an item
+PLAN
+out=$(plint docs/plans/ok.md docs/plans/bad.md); rc=$?
+check "plan-lint: exit 1 on errors" 1 "$rc"
+has() { echo "$out" | grep -c -F -- "$1"; }
+check "plan-lint: reports each missing field with file:line" '1|1|1|1' \
+  "$(has 'docs/plans/bad.md:6: item P2-01 has no Size (S, M or L)')|$(has 'docs/plans/bad.md:6: item P2-01 has no Risk (low or high)')|$(has 'docs/plans/bad.md:6: item P2-01 has no Owner (agent or human)')|$(has 'docs/plans/bad.md:6: item P2-01 has no Acceptance line')"
+check "plan-lint: reports values that are not allowed, and an Acceptance heading with no criterion" '1|1|1|1' \
+  "$(has 'docs/plans/bad.md:7: item P2-02: Size must be S, M or L (got "XL")')|$(has 'item P2-02: Risk must be low or high (got "medium")')|$(has 'item P2-02: Owner must be agent or human (got "robot")')|$(has 'docs/plans/bad.md:7: item P2-02 has no Acceptance line')"
+check "plan-lint: reports an unknown dependency on the line of the Depends on, and knows ids of other plans and issue numbers" '1|0|0' \
+  "$(has 'docs/plans/bad.md:9: item P2-02 depends on P9-99, which no plan defines')|$(has 'depends on P1-01')|$(has 'depends on #12')"
+check "plan-lint: reports a duplicate id with the place of the first" 1 "$(has 'docs/plans/bad.md:14: duplicate item id P2-03 (first defined at docs/plans/bad.md:11)')"
+check "plan-lint: an item with a one-line Acceptance passes, and fences and other headings are not items" '0|0|0' \
+  "$(has 'item P2-03 has no')|$(has 'P7-01')|$(has 'Notes')"
+check "plan-lint: the summary counts the errors" 1 "$(has 'plan-lint: 10 error(s) in 6 item(s)')"
+rm "$T/pl/docs/plans/bad.md"
+out=$(AGENT_PLANS_GLOB='docs/plans/*.md' plint); rc=$?
+check "plan-lint: without arguments it checks the files of AGENT_PLANS_GLOB" '0|1' "$rc|$(echo "$out" | grep -c '2 item(s) in 1 file(s): ok')"
+out=$(plint); rc=$?
+check "plan-lint: without arguments and without AGENT_PLANS_GLOB it says what to do" '1|1' "$rc|$(echo "$out" | grep -c 'set AGENT_PLANS_GLOB')"
+plint docs/plans/missing.md >/dev/null; check "plan-lint: a file that does not exist is an error" 2 $?
+# ids are defined by every plan of the glob, so a dependency may point into another plan; the same id in two plans is a duplicate
+printf -- '---\nstatus: active\n---\n### P5-01 Second plan\n- Size: S · Risk: low · Owner: agent\n- Depends on: P1-03\n- Acceptance:\n  - [ ] x\n### P1-03 Same id as in ok.md\n- Size: S · Risk: low · Owner: agent\n- Acceptance:\n  - [ ] y\n' >"$T/pl/docs/plans/second.md"
+out=$(AGENT_PLANS_GLOB='docs/plans/*.md' plint docs/plans/second.md); rc=$?
+check "plan-lint: a duplicate id across two plans, and a dependency into another plan that is not an error" '1|1|0' \
+  "$rc|$(echo "$out" | grep -c 'second.md:9: duplicate item id P1-03 (first defined at docs/plans/ok.md:')|$(echo "$out" | grep -c 'depends on')"
+rm "$T/pl/docs/plans/second.md"
+# init --plan puts the template at docs/plans/TEMPLATE.md as a template, which plan-lint and triage skip
+AGENT_REPO="$T/pl" "$ROOT/bin/agent-loop" init --plan --no-labels >/dev/null 2>&1
+check "init --plan: writes docs/plans/TEMPLATE.md with status: template" '1|0' \
+  "$(grep -c '^status: template$' "$T/pl/docs/plans/TEMPLATE.md")|$(grep -c '^status: active$' "$T/pl/docs/plans/TEMPLATE.md")"
+out=$(AGENT_PLANS_GLOB='docs/plans/*.md' plint); rc=$?
+check "plan-lint: skips a template, so its example ids do not clash with a copy of it" '0|1' "$rc|$(echo "$out" | grep -c 'in 1 file(s): ok')"
+check "plan-lint: --help and unknown options" '0|1' "$(plint --help >/dev/null; echo $?)|$(plint --nope >/dev/null; echo $?)"
+check "triage prompt: Size and Risk become size:s|m|l and risk:low|high, Owner: human becomes human" '1|1|1|1' \
+  "$(grep -c 'size:s' "$ROOT/prompts/triage.md")|$(grep -c 'risk:low' "$ROOT/prompts/triage.md")|$(grep -c 'risk:high' "$ROOT/prompts/triage.md" | sed 's/^[2-9]/1/')|$(grep -c '`Owner: human` to `human`' "$ROOT/prompts/triage.md")"
+# triage creates size:* / risk:* labels only when the project allows them, and never takes risk:high off an issue
+result '{"summary":"s","actions":[{"op":"update","number":6,"add_labels":["size:s","risk:low","risk:high"],"remove_labels":["risk:high","bug"],"reason":"r"}]}' >"$T/triage-risk.jsonl"
+: >"$GH_LOG"
+FAKE_CLAUDE_RESULT="$T/triage-risk.jsonl" AGENT_PLANS_GLOB='docs/plans/*.md' AGENT_AUTOCREATE_LABELS='size:* risk:*' "$B" "$ROOT/libexec/triage.sh" >"$T/triage.out" 2>&1
+check "triage: size:* and risk:* labels are created when AGENT_AUTOCREATE_LABELS allows them, and risk:high is never removed" '1|1|1|0' \
+  "$(grep -c '^label create size:s ' "$GH_LOG")|$(grep -c '^label create risk:low ' "$GH_LOG")|$(grep -c '^issue edit 6 --add-label size:s,risk:low,risk:high --remove-label bug$' "$GH_LOG")|$(grep -c 'remove-label.*risk:high' "$GH_LOG")"
+: >"$GH_LOG"
+FAKE_CLAUDE_RESULT="$T/triage-risk.jsonl" AGENT_PLANS_GLOB='docs/plans/*.md' "$B" "$ROOT/libexec/triage.sh" >"$T/triage.out" 2>&1
+check "triage: without AGENT_AUTOCREATE_LABELS the new size and risk labels are not added" '0|1' \
+  "$(grep -c 'size:s' "$GH_LOG")|$(grep -c '^issue edit 6 --add-label risk:high --remove-label bug$' "$GH_LOG")"
+
 # --- The risk:high label (#44) ---
 : >"$GH_LOG"
 FAKE_LABELS_NO_RISK=1 ensure_labels

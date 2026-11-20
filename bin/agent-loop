@@ -15,13 +15,15 @@ usage() {
   cat <<'EOF'
 Usage: agent-loop <command> [options]     (run inside the target project's git checkout)
 
-  init [--force] [--hook] [--no-labels] [--dry-run]
-                          set up the current project (config, prompts, labels; --hook also adds the
-                          verify Stop hook to .claude/settings.json for interactive sessions)
+  init [--force] [--hook] [--plan] [--no-labels] [--no-workflow] [--dry-run]
+                          set up the current project (config, prompts, labels, the review workflow; --hook also adds
+                          the verify Stop hook to .claude/settings.json for interactive sessions; --plan writes
+                          docs/plans/TEMPLATE.md; --no-workflow skips the review workflow)
   doctor                  check the tools the loop needs
+  plan-lint [files...]    check plan files (default: AGENT_PLANS_GLOB) for items triage can use; exit 1 on errors
   start [--once] [--dry-run] [--no-triage]
                           run the loop (Ctrl-C to stop; --dry-run prints what it would do)
-  status                  running agents, agent PRs, blocked issues, issues ready to start
+  status                  running agents, agent PRs (with their risk), blocked issues, issues ready to start
   kill                    stop running agents (worktrees stay; the next run continues from them)
   unpause                 clear a usage-limit pause
   work <issue> [--fix]    run one issue by hand (implement, or fix its PR)
@@ -47,6 +49,7 @@ case "$cmd" in
   triage) exec "$PKG/libexec/triage.sh" "$@" ;;
   stats) exec "$PKG/libexec/stats.sh" "$@" ;;
   lessons) exec "$PKG/libexec/lessons.sh" "$@" ;;
+  plan-lint) exec "$PKG/libexec/plan-lint.sh" "$@" ;;
   labels) exec "$PKG/libexec/init.sh" --labels-only ;;
   init) exec "$PKG/libexec/init.sh" "$@" ;;
   doctor) exec "$PKG/libexec/init.sh" --check ;;
