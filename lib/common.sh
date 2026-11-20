@@ -101,8 +101,8 @@ case "$AGENT_PROMPTS_DIR" in /*) PROMPTS_DIR=$AGENT_PROMPTS_DIR ;; *) PROMPTS_DI
 # --arg assoc "$AGENT_TRUSTED_ASSOCIATIONS" --arg users "$AGENT_TRUSTED_USERS".
 # shellcheck disable=SC2016
 JQ_TRUSTED='def trusted($u; $a):
-  ($assoc | split(" ") | map(select(. != ""))) as $as | ($users | split(" ") | map(select(. != ""))) as $us
-  | (($as | index("*")) != null) or (($as | index($a // "")) != null) or (($us | index($u // "")) != null);'
+  ($assoc | split(" ") | map(select(. != ""))) as $assocs | ($users | split(" ") | map(select(. != ""))) as $us
+  | (($assocs | index("*")) != null) or (($assocs | index($a // "")) != null) or (($us | index($u // "")) != null);'
 
 AGENT_MARKER='🤖 agent:'   # comments that start with this are the agent's own and never count as "new feedback"
 L_OK=agent-ok L_WIP=agent-wip L_BLOCKED=agent-blocked L_HUMAN=human

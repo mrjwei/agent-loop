@@ -20,5 +20,10 @@ uninstall:
 test:
 	bash test/run.sh
 
+# jq before 1.7 rejects a keyword as a variable name (`... as $$as`): a compile error that newer jq (and CI) accepts
+JQ_KEYWORDS = as|if|then|elif|else|end|def|reduce|foreach|try|catch|label|import|include|and|or|not|__loc__
+
 lint:
 	shellcheck -S warning bin/agent-loop lib/common.sh libexec/*.sh test/run.sh
+	@! grep -nE 'as \$$($(JQ_KEYWORDS))\b|def [a-z_]+\([^)]*\$$($(JQ_KEYWORDS))[;)]' bin/agent-loop lib/common.sh libexec/*.sh \
+	  || { echo "lint: a jq variable above is named after a keyword, which jq < 1.7 cannot compile" >&2; exit 1; }

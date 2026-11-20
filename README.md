@@ -13,7 +13,7 @@ It is a set of bash scripts (macOS bash 3.2 compatible) around `claude -p`, `gh`
 
 ## Requirements
 
-- `git` ≥ 2.31, `jq`, [`gh`](https://cli.github.com) (authenticated: `gh auth login`), and the [`claude`](https://claude.com/claude-code) CLI
+- `git` ≥ 2.31, `jq` ≥ 1.6, [`gh`](https://cli.github.com) (authenticated: `gh auth login`), and the [`claude`](https://claude.com/claude-code) CLI
 - A GitHub repository with an `origin` remote. Protect the base branch so nothing can be pushed to it without a PR; the safety model relies on this.
 - macOS or Linux. Keep-awake (`caffeinate`) is macOS-only and skipped elsewhere.
 
