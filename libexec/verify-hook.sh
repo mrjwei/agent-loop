@@ -4,14 +4,18 @@
 #
 #   verify-hook.sh --loop   passed by agent-loop to every implement / fix agent (work.sh --settings)
 #   verify-hook.sh          a copy installed into a project by `agent-loop init --hook`, for interactive sessions
+#   verify-hook.sh --plugin run by the agent-loop Claude Code plugin (hooks/hooks.json); acts like the project copy
 input=$(cat)
-from_loop=0
+from_loop=0 from_plugin=0
 [ "${1:-}" = --loop ] && from_loop=1
+[ "${1:-}" = --plugin ] && from_plugin=1
 # A project copy steps aside inside agent-loop runs, which already pass their own (the checks would run twice)
 [ "$from_loop" = 0 ] && [ "${AGENT_LOOP_RUN:-}" = 1 ] && exit 0
 # Already retried once: let it stop; CI is the backstop
 echo "$input" | grep -q '"stop_hook_active": *true' && exit 0
 cd "${CLAUDE_PROJECT_DIR:-.}" || exit 0
+# The plugin steps aside when the project has its own copy (`agent-loop init --hook`), which runs anyway
+[ "$from_plugin" = 1 ] && [ -f .claude/hooks/agent-loop-verify.sh ] && exit 0
 
 if [ "$from_loop" = 0 ]; then
   # Read the project's config: this checkout's copy first, then the main checkout's (agent worktrees). Environment wins.

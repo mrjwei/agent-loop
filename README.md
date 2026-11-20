@@ -11,6 +11,41 @@ You do two things: **merge PRs** and **answer blocked issues**. Merging a PR clo
 
 It is a set of bash scripts (macOS bash 3.2 compatible) around `claude -p`, `gh`, `git` and `jq`.
 
+## Two ways to use it
+
+Most work needs a person: to decide what is not written down, and to judge the result. So the default is **supervised**:
+the same workflows the loop runs, as skills in your own Claude Code sessions. The **background loop** is for the
+exception: issues that are decided, self-contained and checkable by the project's own checks.
+
+| | Supervised (Claude Code plugin) | Background (`agent-loop start`) |
+|---|---|---|
+| Who answers questions | you, in the session | an issue comment, read next round |
+| Fits | new projects, design work, anything undecided | chores and well-specified issues once the architecture and tests are stable |
+| Setup | install the plugin | `agent-loop init`, labels, `.agent-loop.conf`, a running loop |
+
+Both use the same conventions (`agent/issue-<n>` branches, the `## Acceptance criteria` section, `Depends on:` /
+`Touches:` lines, `.agent-loop/prompts/project.md`), so an issue can move from one to the other.
+
+### The Claude Code plugin
+
+This repository is also a Claude Code plugin and its own marketplace:
+
+```
+/plugin install agent-loop --marketplace mrjwei/agent-loop
+```
+
+| Part | What it does |
+|---|---|
+| `implement-issue` skill | Implements an issue with you: asks about undecided points, plans, tests first, has `acceptance-reviewer` check it, then opens a PR with `## Acceptance criteria` and `Closes` / `Refs`. Uses the loop's branch and worktree names when the project has `.agent-loop.conf`, so the loop can take over fix rounds. |
+| `address-pr-feedback` skill | Resolves conflicts, fixes failing checks, weighs each review comment, updates the acceptance criteria and answers with one `🤖 agent:` comment. |
+| `plan-to-issues` skill | Compares plan documents with the issues and proposes creates, updates, `Depends on:` and `Touches:` lines; applies only what you approve. |
+| `delegate-issue` skill | Checks whether an issue is ready for the background loop (decided, acceptance criteria, self-contained, size, dependencies), fixes the gaps with you, and adds `agent-ok`. Suggests `agent-automerge` or `risk:high`, and adds them only when you say so. |
+| `harvest-lessons` skill | Groups why agents got blocked and what reviewers keep asking for (from `lessons.jsonl` and GitHub), and proposes rules for `CLAUDE.md`, `project.md` or `AGENT_EXTRA_DENY`. |
+| `acceptance-reviewer` agent | A read-only reviewer with a fresh context, with the same rules as the review workflow: only blocking findings, and every acceptance criterion checked against its evidence. |
+| Stop hook | `verify-hook.sh --plugin`: runs `AGENT_VERIFY_CMD` before Claude stops. It does nothing without that command, and it steps aside when the project already has the hook installed (`init --hook`) or inside loop runs. |
+
+The skills need `gh` and `git`. They work in any repository; `.agent-loop.conf` and `project.md` are read when present.
+
 ## Requirements
 
 - `git` ≥ 2.31, `jq`, [`gh`](https://cli.github.com) (authenticated: `gh auth login`), and the [`claude`](https://claude.com/claude-code) CLI
