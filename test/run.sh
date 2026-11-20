@@ -31,7 +31,10 @@ cat >"$T/bin/gh" <<'EOF'
 q=. prev=
 for a in "$@"; do case "$prev" in -q | --jq) q=$a ;; esac; prev=$a; done
 case "$*" in
+  "repo view --json viewerPermission"*) printf '{"viewerPermission":"%s"}\n' "${FAKE_PERM:-WRITE}" | jq -r "$q" ;;
   "repo view"*) echo "o/r" ;;
+  "auth status"*) ;;
+  "api user"*) echo "${FAKE_GH_USER:-me}" ;;
   "api --paginate repos/o/r/pulls/"*"/files"*) # the changed files of PR n, in the REST format, from $FIX/pr-api-files-<n>.json
     n=${3#repos/o/r/pulls/}; n=${n%%/*}; if [ -f "$FIX/pr-api-files-$n.json" ]; then jq -c "$q" "$FIX/pr-api-files-$n.json"; fi ;;
   "pr list --head "*) # --head <branch> --state <state>
@@ -915,6 +918,7 @@ AGENT_REPO="$T/proj4" "$ROOT/bin/agent-loop" init --no-labels >/dev/null 2>&1
 check "init: leaves an existing workflow that does not use claude-code-action alone" '# my own review workflow' "$(cat "$T/proj4/$WF")"
 AGENT_REPO="$T/proj4" "$ROOT/bin/agent-loop" init --no-labels --force >/dev/null 2>&1
 check "init --force: replaces it with the template" same "$(cmp -s "$TPL" "$T/proj4/$WF" && echo same || echo different)"
+
 # --- Plan template and plan-lint (#45) ---
 git init -q -b main "$T/pl"; mkdir -p "$T/pl/docs/plans"
 plint() { (cd "$T/pl" && AGENT_REPO="$T/pl" "$ROOT/bin/agent-loop" plan-lint "$@" 2>&1); }
@@ -992,8 +996,6 @@ check "triage: size:* and risk:* labels are created when AGENT_AUTOCREATE_LABELS
 FAKE_CLAUDE_RESULT="$T/triage-risk.jsonl" AGENT_PLANS_GLOB='docs/plans/*.md' "$B" "$ROOT/libexec/triage.sh" >"$T/triage.out" 2>&1
 check "triage: without AGENT_AUTOCREATE_LABELS the new size and risk labels are not added" '0|1' \
   "$(grep -c 'size:s' "$GH_LOG")|$(grep -c '^issue edit 6 --add-label risk:high --remove-label bug$' "$GH_LOG")"
-
-# --- The risk:high label (#44) ---
 : >"$GH_LOG"
 FAKE_LABELS_NO_RISK=1 ensure_labels
 check "labels: risk:high is created with the others" '1|1' \
@@ -1005,6 +1007,29 @@ check "labels: every description fits GitHub's 100-character limit" '6|' \
   "$(grep -c '^label create ' "$GH_LOG")|$(sed -n 's/^label create \([^ ]*\) .* --description //p' "$GH_LOG" | awk 'length > 100')"
 : >"$GH_LOG"
 
+# --- Running the loop as a machine account (#46) ---
+doctor() { AGENT_REPO="$T/proj" "$ROOT/bin/agent-loop" doctor 2>&1; }
+out=$(AGENT_NOTIFY=1 AGENT_NOTIFY_USER=me FAKE_GH_USER=me doctor)
+check "doctor: warns when the loop's gh user is AGENT_NOTIFY_USER" '1|1' \
+  "$(echo "$out" | grep -c "^WARNING  the loop's gh user (me) is AGENT_NOTIFY_USER: GitHub does not notify you of your own mentions")|$(echo "$out" | grep -c 'the loop acts as GitHub user me')"
+check "doctor: the comparison ignores case and a leading @, and says AGENT_NOTIFY_CMD still works" '1|1' \
+  "$(AGENT_NOTIFY=1 AGENT_NOTIFY_USER=@ME FAKE_GH_USER=me doctor | grep -c "is AGENT_NOTIFY_USER")|$(AGENT_NOTIFY=1 AGENT_NOTIFY_USER=me AGENT_NOTIFY_CMD=true FAKE_GH_USER=me doctor | grep -c 'AGENT_NOTIFY_CMD still works')"
+out=$(AGENT_NOTIFY=1 AGENT_NOTIFY_USER=me FAKE_GH_USER=my-bot doctor)
+check "doctor: no warning for a separate machine account with write permission" '0|1' \
+  "$(echo "$out" | grep -c '^WARNING  .*\(AGENT_NOTIFY_USER\|admin permission\)')|$(echo "$out" | grep -c 'the loop acts as GitHub user my-bot')"
+check "doctor: no mention warning when notifications are off or no AGENT_NOTIFY_USER is set" '0|0' \
+  "$(AGENT_NOTIFY=0 AGENT_NOTIFY_USER=me FAKE_GH_USER=me doctor | grep -c "is AGENT_NOTIFY_USER")|$(AGENT_NOTIFY=1 AGENT_NOTIFY_USER="" FAKE_GH_USER=me doctor | grep -c "is AGENT_NOTIFY_USER")"
+out=$(AGENT_NOTIFY=1 AGENT_NOTIFY_USER=me FAKE_GH_USER=my-bot FAKE_PERM=ADMIN doctor)
+check "doctor: warns when the loop's user has admin permission on the repository" '1|0' \
+  "$(echo "$out" | grep -c '^WARNING  my-bot has admin permission on this repository')|$(echo "$out" | grep -c "is AGENT_NOTIFY_USER")"
+check "doctor: write and maintain permission are fine" '0|0' \
+  "$(FAKE_PERM=WRITE doctor | grep -c 'admin permission')|$(FAKE_PERM=MAINTAIN doctor | grep -c 'admin permission')"
+out=$(AGENT_NOTIFY=1 AGENT_NOTIFY_USER=me FAKE_GH_USER=me FAKE_PERM=ADMIN doctor)
+check "doctor: both warnings together, and the exit status is still 0" '2|0' "$(echo "$out" | grep -c '^WARNING  .*\(AGENT_NOTIFY_USER\|admin permission\)')|$(AGENT_NOTIFY=1 AGENT_NOTIFY_USER=me FAKE_GH_USER=me FAKE_PERM=ADMIN doctor >/dev/null; echo $?)"
+out=$(FAKE_GH_USER=my-bot "$B" "$ROOT/libexec/loop.sh" --status 2>&1 | head -1)
+check "status: shows which account the loop acts as" '== Acting as GitHub user my-bot' "$out"
+out=$(AGENT_NOTIFY_USER=my-bot FAKE_GH_USER=My-Bot "$B" "$ROOT/libexec/loop.sh" --status 2>&1 | head -1)
+check "status: and says when that is AGENT_NOTIFY_USER" '== Acting as GitHub user My-Bot (this is AGENT_NOTIFY_USER: its mentions will not notify you)' "$out"
 
 # --- CLI ---
 check "cli: version" "$(cat "$ROOT/VERSION")" "$("$ROOT/bin/agent-loop" version)"

@@ -68,8 +68,9 @@ Or vendor it into a project as a submodule (`git submodule add <url> tools/agent
 
 ```bash
 cd ~/projects/my-project
-agent-loop doctor      # checks the tools above
+agent-loop doctor      # checks the tools above, and which GitHub account the loop acts as
 agent-loop init        # writes .agent-loop.conf, .agent-loop/prompts/project.md, and the labels
+                       # (add --plan for the plan template)
 ```
 
 `init` does the following, and `--dry-run` shows it without changing anything:
@@ -95,7 +96,7 @@ Then:
 
 ```bash
 agent-loop start [--once] [--dry-run] [--no-triage]   # run the loop (Ctrl-C stops it; running agents finish)
-agent-loop status                                      # running agents, agent PRs, blocked issues, ready issues
+agent-loop status                                      # the account the loop acts as, running agents, agent PRs with their risk, blocked and ready issues
 agent-loop kill                                        # stop running agents and their claude processes (worktrees stay; the next run continues from them)
 agent-loop unpause                                     # clear a usage-limit pause
 agent-loop work <issue> [--fix]                        # run a single issue by hand
@@ -104,7 +105,7 @@ agent-loop stats [--days N] [--json|--digest]          # outcomes, turns and cos
 agent-loop lessons [--days N]                          # why agents stopped and what reviewers asked for (default 30 days), newest first
 agent-loop plan-lint [files...]                        # check plan files (default: AGENT_PLANS_GLOB) for items triage can use; exit 1 on errors
 agent-loop labels                                      # (re)create the labels (including agent-automerge and risk:high)
-agent-loop doctor                                      # check tools, claude CLI options, gh auth, base branch
+agent-loop doctor                                      # check tools, claude CLI options, gh auth and account, base branch
 agent-loop version
 ```
 
@@ -233,7 +234,7 @@ The reason an agent stopped is written to an issue comment, and review feedback 
 
 Three events need a person: an agent stopped (`agent-blocked`), a PR was opened, and agents are paused by a usage limit. The scripts send the notifications themselves; no model call is involved, and `AGENT_NOTIFY=0` turns them all off. A failing notification is logged and never fails the loop.
 
-- **GitHub (default).** The loop's comment on a blocked issue and its comment on a newly opened PR mention `AGENT_NOTIFY_USER`, so GitHub delivers a mobile push and an email with a link to the thread. Set it to your login (`init` fills in the authenticated user). GitHub does not notify you about your own comments, so this channel works when the loop's `gh` account is not `AGENT_NOTIFY_USER` (for example a bot account); if the loop runs as you, add `AGENT_NOTIFY_CMD`.
+- **GitHub (default).** The loop's comment on a blocked issue and its comment on a newly opened PR mention `AGENT_NOTIFY_USER`, so GitHub delivers a mobile push and an email with a link to the thread. Set it to your login (`init` fills in the authenticated user). GitHub does not notify you about your own comments, so this channel works when the loop's `gh` account is not `AGENT_NOTIFY_USER` (for example a bot account: see "Run the loop as a machine account"; `agent-loop doctor` warns when they are the same); if the loop runs as you, add `AGENT_NOTIFY_CMD`.
 - **`AGENT_NOTIFY_CMD` (optional).** Run for all three events with the title and body appended as arguments (`$1`, `$2`), the issue or PR URL in `$AGENT_NOTIFY_URL`, and the title and body also in `$AGENT_NOTIFY_TITLE` and `$AGENT_NOTIFY_BODY`. The usage-limit pause has no issue to comment on, so it uses this channel only (it is also shown at the top of `agent-loop status`). A working example with [ntfy](https://ntfy.sh), which pushes to the ntfy phone app:
 
   ```bash
@@ -241,6 +242,31 @@ Three events need a person: an agent stopped (`agent-blocked`), a PR was opened,
   ```
 
   Pushover, a Slack webhook and the like work the same way: any command that reads `$1`, `$2` and `$AGENT_NOTIFY_URL`.
+
+### Run the loop as a machine account
+
+By default the loop acts as whatever account `gh` is logged in as, usually the project owner. Then the agents' PRs are opened by the owner, who cannot approve their own PRs; GitHub does not notify a user of mentions written by their own account, so the mention channel under "Notifications" stays silent; the audit trail mixes the owner's actions with the agents'; and the token the loop holds has the owner's admin rights. A separate account fixes all four:
+
+1. Create the account (GitHub allows one machine account per person, and it may be a free account) and invite it to the repository with **write** access.
+2. As that account, create a fine-grained personal access token limited to the project repositories, with repository permissions **Contents**, **Pull requests** and **Issues** set to read and write, **Checks**, **Commit statuses** and **Actions** set to read, and **no Administration**. (Without the read permissions the base-branch check and the auto-merge conditions cannot see checks: a failed read looks like "no checks".) If your repository is in an organization, the organization may need to allow fine-grained tokens and approve this one.
+3. Set `GH_TOKEN` **only for the loop process**, not in your shell profile, and run the loop from a terminal or service that has it:
+
+   ```bash
+   GH_TOKEN=github_pat_xxx agent-loop start
+   # or, in a systemd unit / launchd plist / process manager: Environment=GH_TOKEN=...
+   ```
+
+   `gh` uses `GH_TOKEN` before its stored login, so your own `gh auth login` session is untouched. `git push` to `origin` still uses your git credentials: give the machine account push access the same way (an SSH deploy key with write access, or a credential helper that reads `GH_TOKEN`: `gh auth setup-git`).
+4. Your own login keeps admin: use it for `agent-loop init` and for branch protection (require a PR and, if you want, one approval: the machine account's PRs can now be approved by you). Set `AGENT_NOTIFY_USER` to **your** login.
+
+Check it:
+
+```bash
+GH_TOKEN=github_pat_xxx agent-loop doctor    # "the loop acts as GitHub user <machine account>"
+GH_TOKEN=github_pat_xxx agent-loop status    # first line: "== Acting as GitHub user <machine account>"
+```
+
+`agent-loop doctor` warns when the loop's `gh` user is `AGENT_NOTIFY_USER` (the mentions will not notify you) and when that user has admin permission on the repository (the loop holds more rights than it needs). `agent-loop status` always shows which account the loop acts as. See also "Safety model".
 
 ### Issues that change the same files
 
@@ -340,6 +366,7 @@ These are best-effort defenses, **not a sandbox**: the agents run with your own 
 
 - **Whose words count**: text on GitHub becomes instructions to an agent, so the people who can write it are the trust boundary. Only comments from trusted authors (`AGENT_TRUSTED_ASSOCIATIONS`, by default the owner, organization members and collaborators, plus `AGENT_TRUSTED_USERS`) start a fix run or reach the fix prompt. Triage never adds `agent-ok` to an issue someone else opened; label it yourself after reading it. The agents still read whole issue and PR threads with `gh`, and the prompts tell them to treat other people's comments as information only, which is a weaker defense: on a public repository, read a thread before you label its issue `agent-ok`.
 - **Who can cause a merge**: only the loop merges. With the default policy, only the PR of an issue that carries `agent-automerge`; that label is set by whoever can label issues in the repository (people with triage or write access), triage never adds it and the agents cannot change labels. With `AGENT_AUTOMERGE_POLICY=risk`, also a PR the loop judges low-risk from its diff (a PR that touches `AGENT_RISK_PATHS`, is large, removes tests or whose issue is `risk:high` is never judged low-risk, and no label overrides a high-risk path). Comments, even from trusted authors, never merge anything. The conditions under "Auto-merge" must all hold, and branch protection still applies. If you do not want the loop to merge at all, set `AGENT_AUTOMERGE=0`.
+- **Whose account**: run the loop as a machine account with a fine-grained token that can write but not administer ("Run the loop as a machine account"), so that a mistake or a hijacked run cannot change settings, branch protection or secrets with your admin rights. `agent-loop doctor` warns when the loop's user has admin permission.
 - **Denied commands** (built in): `gh pr merge`, closing PRs or issues, label changes, `gh api`, `gh auth`, `gh repo/secret/variable/workflow/release`, force-push (including `+refspec`), pushing to the base branch, `git rebase`, `git reset --hard`, `git worktree`. Patterns also match in the middle of a command line. Your project's deploy and production commands are **yours to add** in `AGENT_EXTRA_DENY`.
 - **Credentials**: the variables in `AGENT_SCRUB_ENV` are removed for the agents and for `AGENT_SETUP_CMD` (an install runs scripts from the worktree); `~/.aws`, `~/.ssh`, `~/.config/gh` and the macOS keychain are denied to the Read tool and to shell commands that name them. Of the main checkout's `.env` files, the Read tool is denied `.env`, `.env.local`, `.env.production` and `.env.*.local`; shell commands are denied when they name `.env.local` or `.env.production`, or any `.env*` file by the main checkout's absolute path. A shell command that reaches a plain `.env` through a relative path matches no rule and is left to the permission classifier, so keep production keys out of the main checkout where you can.
 - **MCP**: `--strict-mcp-config` means no MCP servers or claude.ai connectors are loaded.

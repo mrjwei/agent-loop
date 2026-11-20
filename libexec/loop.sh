@@ -456,10 +456,12 @@ do_tick() {
 }
 
 show_status() {
-  local f n failing why p report risk
+  local f n failing why p report risk me
   ISSUES_JSON=$(mktemp "$STATE/status-issues.XXXXXX") PRS_JSON=$(mktemp "$STATE/status-prs.XXXXXX")
   PRFILES=$(mktemp "$STATE/status-prfiles.XXXXXX") PRFILES_BUILT=0
   trap 'rm -f "$ISSUES_JSON" "$PRS_JSON" "$PRFILES"' EXIT
+  me=$(gh_user)
+  echo "== Acting as GitHub user ${me:-(unknown: is gh authenticated?)}$(if [ -n "$me" ] && same_login "$me" "$AGENT_NOTIFY_USER"; then echo ' (this is AGENT_NOTIFY_USER: its mentions will not notify you)'; fi)"
   paused && echo "== Paused by a usage limit until $(fmt_epoch "$(paused_until)") (resume now: agent-loop unpause)"
   failing=$(base_failing_names)
   [ -z "$failing" ] || echo "== Checks are failing on $BASE_REF ($failing): no agent starts until they pass"

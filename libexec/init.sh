@@ -23,6 +23,22 @@ for a in "$@"; do
 done
 export DRY=${DRY:-0}
 
+# Who the loop acts as, and whether that is a good account for it (README: "Run the loop as a machine account")
+check_account() {
+  local me perm
+  me=$(gh_user)
+  [ -n "$me" ] || { echo "info     could not read the GitHub user gh acts as"; return 0; }
+  echo "info     the loop acts as GitHub user $me"
+  if [ "$AGENT_NOTIFY" = 1 ] && same_login "$me" "$AGENT_NOTIFY_USER"; then
+    echo "WARNING  the loop's gh user ($me) is AGENT_NOTIFY_USER: GitHub does not notify you of your own mentions, so the comments on blocked issues and opened PRs stay silent${AGENT_NOTIFY_CMD:+ (AGENT_NOTIFY_CMD still works)}. Run the loop as a machine account (see the README)"
+  fi
+  perm=$(gh repo view --json viewerPermission -q .viewerPermission 2>/dev/null || true)
+  if [ "$perm" = ADMIN ]; then
+    echo "WARNING  $me has admin permission on this repository, and the loop holds its token. Run the loop with a token that can write but not administer (see the README: \"Run the loop as a machine account\")"
+  fi
+  return 0
+}
+
 check_prereqs() {
   local t bad=0
   for t in git jq gh claude; do
@@ -30,7 +46,7 @@ check_prereqs() {
     else echo "MISSING  $t"; bad=1; fi
   done
   if command -v gh >/dev/null 2>&1; then
-    if gh auth status >/dev/null 2>&1; then echo "ok       gh is authenticated"
+    if gh auth status >/dev/null 2>&1; then echo "ok       gh is authenticated"; check_account
     else echo "WARNING  gh is not authenticated (run: gh auth login)"; fi
   fi
   if ! git rev-parse --path-format=absolute --git-common-dir >/dev/null 2>&1; then
