@@ -89,13 +89,18 @@ resolve() { # number or ref -> number (empty if it cannot be resolved)
     *) echo "$1" ;;
   esac
 }
-subst_refs() { # replace {{ref}} in a body with the issue number
+subst_refs() { # replace {{ref}} in a body with #<issue number> (a # the model wrote before it, as in #{{ref}}, is dropped)
   local text=$1 f k
   for f in "$tmp"/ref-*; do
     [ -f "$f" ] || continue
     k=${f##*/ref-}
     text=$(T_X="#$(cat "$f")" K="{{$k}}" awk 'BEGIN { k = ENVIRON["K"]; v = ENVIRON["T_X"] }
-      { line = $0; out = ""; while ((i = index(line, k)) > 0) { out = out substr(line, 1, i - 1) v; line = substr(line, i + length(k)) } print out line }' <<<"$text")
+      { line = $0; out = ""
+        while ((i = index(line, k)) > 0) {
+          pre = substr(line, 1, i - 1); if (substr(pre, length(pre)) == "#") pre = substr(pre, 1, length(pre) - 1)
+          out = out pre v; line = substr(line, i + length(k))
+        }
+        print out line }' <<<"$text")
   done
   printf '%s' "$text"
 }

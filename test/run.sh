@@ -46,9 +46,12 @@ case "$*" in
   "pr list --state open"*) jq '[.[] | select(.state == "OPEN")]' "$FIX/prs.json" | jq -r "$q" ;;
   "issue list --state closed"*) echo '[]' ;;
   "issue list --label"*) echo '[]' | jq -r "$q" ;;
-  "label list"*) if [ -n "${FAKE_LABELS_NO_RISK:-}" ]; then risk=''; else risk=',{"name":"risk:high"}'; fi
+  "label list"*) [ -z "${FAKE_LABELS_NONE:-}" ] || { echo '[]' | jq -r "$q"; exit 0; }
+                 if [ -n "${FAKE_LABELS_NO_RISK:-}" ]; then risk=''; else risk=',{"name":"risk:high"}'; fi
                  echo '[{"name":"agent-ok"},{"name":"agent-wip"},{"name":"agent-blocked"},{"name":"human"},{"name":"bug"},{"name":"agent-automerge"}'"$risk]" | jq -r "$q" ;;
-  "issue edit"* | "issue comment"* | "pr comment"* | "label create"*) echo "$*" >>"$GH_LOG" ;;
+  "issue edit"*) echo "$*" >>"$GH_LOG"   # keep a --body-file's text: triage deletes the file when it ends
+    prev=; for a in "$@"; do [ "$prev" = --body-file ] && cp "$a" "$FIX/edit-body-$3.md"; prev=$a; done ;;
+  "issue comment"* | "pr comment"* | "label create"*) echo "$*" >>"$GH_LOG" ;;
   "issue create"*) echo "$*" >>"$GH_LOG"; echo "https://github.com/o/r/issues/101" ;;
   "api graphql"*"after=CURSOR1"*) cat "$FIX/page2.json" ;;
   "api graphql"*) cat "$FIX/page1.json" ;;
@@ -255,6 +258,14 @@ echo '{}' | AGENT_LOOP_RUN=1 AGENT_VERIFY_CMD=false hook; check "verify-hook: pr
 printf "AGENT_VERIFY_CMD=false\n" >"$T/proj/.agent-loop.conf"
 echo '{}' | env -u AGENT_VERIFY_CMD "$B" -c 'cd "$1" && CLAUDE_PROJECT_DIR="$1" "$2" "$3/libexec/verify-hook.sh"' _ "$T/proj" "$B" "$ROOT" 2>/dev/null
 check "verify-hook: project copy reads .agent-loop.conf" 2 $?
+echo '{}' | env -u AGENT_VERIFY_CMD "$B" -c 'cd "$1" && CLAUDE_PROJECT_DIR="$1" "$2" "$3/libexec/verify-hook.sh" --plugin' _ "$T/proj" "$B" "$ROOT" 2>/dev/null
+check "verify-hook: plugin reads .agent-loop.conf" 2 $?
+mkdir -p "$T/proj/.claude/hooks" && : >"$T/proj/.claude/hooks/agent-loop-verify.sh"
+echo '{}' | AGENT_VERIFY_CMD=false hook --plugin; check "verify-hook: plugin steps aside for the project's own copy" 0 $?
+rm -rf "$T/proj/.claude/hooks"
+check "plugin: hooks.json runs verify-hook.sh --plugin" 'bash "${CLAUDE_PLUGIN_ROOT}/libexec/verify-hook.sh" --plugin' \
+  "$(jq -r '.hooks.Stop[0].hooks[0].command' "$ROOT/hooks/hooks.json")"
+check "plugin: plugin.json version matches VERSION" "$(cat "$ROOT/VERSION")" "$(jq -r .version "$ROOT/.claude-plugin/plugin.json")"
 rm -f "$T/proj/new.txt" "$T/proj/.agent-loop.conf"
 echo '{}' | AGENT_VERIFY_CMD=false hook --loop; check "verify-hook: nothing changed, nothing to verify" 0 $?
 
@@ -271,6 +282,14 @@ check "triage: runs to the end" 0 $?
 check "triage: agent-ok is added for a trusted author, never for a stranger's issue" 'issue edit 6 --add-label agent-ok,bug' \
   "$(grep -E '^issue edit (6|10) ' "$GH_LOG" | tr '\n' ';' | sed 's/;$//')"
 check "triage: says why it refused" 1 "$(grep -c 'not adding agent-ok: #10 was opened by mallory' "$T/triage.out")"
+# a body may refer to an issue created earlier in the run as {{ref}} or #{{ref}}: both become #<number>, never ##<number> (#61)
+result '{"summary":"s","actions":[
+  {"op":"create","ref":"new1","title":"t","body":"b","reason":"r"},
+  {"op":"update","number":6,"body":"Depends on: #{{new1}}\nsee {{new1}}","reason":"r"}]}' >"$T/triage-refs.jsonl"
+rm -f "$FIX/edit-body-6.md"
+FAKE_CLAUDE_RESULT="$T/triage-refs.jsonl" AGENT_PLANS_GLOB='docs/plans/*.md' "$B" "$ROOT/libexec/triage.sh" >"$T/triage.out" 2>&1
+check "triage: #{{ref}} and {{ref}} both become #<number>" $'Depends on: #101\nsee #101' "$(cat "$FIX/edit-body-6.md" 2>/dev/null)"
+check "prompts: triage says the # before a ref is added for you" 1 "$(grep -c 'the `#` is added for you' "$ROOT/prompts/triage.md")"
 
 # --- work.sh: fix runs on PR #20 (issue 3), which has a failing check ---
 result '{"status":"fixed","summary":"nothing to change"}' >"$T/fix-result.jsonl"
@@ -979,6 +998,11 @@ check "triage: without AGENT_AUTOCREATE_LABELS the new size and risk labels are 
 FAKE_LABELS_NO_RISK=1 ensure_labels
 check "labels: risk:high is created with the others" '1|1' \
   "$(grep -c '^label create risk:high --color d93f0b --description The PR of this issue is never merged automatically$' "$GH_LOG")|$(wc -l <"$GH_LOG" | tr -d ' ')"
+: >"$GH_LOG"
+# GitHub rejects a label description over 100 characters, and the label is then never created (#62)
+FAKE_LABELS_NONE=1 ensure_labels
+check "labels: every description fits GitHub's 100-character limit" '6|' \
+  "$(grep -c '^label create ' "$GH_LOG")|$(sed -n 's/^label create \([^ ]*\) .* --description //p' "$GH_LOG" | awk 'length > 100')"
 : >"$GH_LOG"
 
 

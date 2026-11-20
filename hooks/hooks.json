@@ -1,0 +1,16 @@
+{
+  "description": "Before Claude stops, run the project's AGENT_VERIFY_CMD (from .agent-loop.conf or the environment) and keep working while it fails. Does nothing without a command, when nothing changed, inside agent-loop runs, or when the project has its own copy of the hook.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/libexec/verify-hook.sh\" --plugin",
+            "timeout": 600
+          }
+        ]
+      }
+    ]
+  }
+}

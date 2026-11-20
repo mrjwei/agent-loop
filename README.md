@@ -1,19 +1,56 @@
 # agent-loop
 
-An autonomous issue-to-PR loop driven by headless [Claude Code](https://claude.com/claude-code). Run it in a project's git checkout and it:
+Issue-to-PR workflows on [Claude Code](https://claude.com/claude-code), used two ways (see "Two ways to use it"): as a **Claude Code plugin** in sessions you supervise, which is the default, and as a **background loop** on headless `claude -p` for issues that are decided, self-contained and checkable.
+
+Run in a project's git checkout, the background loop:
 
 1. cleans up the worktrees and branches of merged or closed PRs,
 2. fixes agent PRs that have merge conflicts, failing checks or new review feedback,
 3. optionally compares your plan files with the GitHub issues and keeps them in sync (triage),
 4. starts agents in parallel for issues labeled `agent-ok` whose dependencies are closed, each in its own git worktree, ending in a PR.
 
-You do two things: **merge PRs** and **answer blocked issues**. Merging a PR closes the dependency of the issues waiting on it, so the next round starts them. AI cost only accrues while an agent runs.
+With the loop, you do two things: **merge PRs** and **answer blocked issues**. Merging a PR closes the dependency of the issues waiting on it, so the next round starts them. AI cost only accrues while an agent runs.
 
-It is a set of bash scripts (macOS bash 3.2 compatible) around `claude -p`, `gh`, `git` and `jq`.
+The loop is a set of bash scripts (macOS bash 3.2 compatible) around `claude -p`, `gh`, `git` and `jq`; the plugin is skills, an agent and a hook in the same repository.
+
+## Two ways to use it
+
+Most work needs a person: to decide what is not written down, and to judge the result. So the default is **supervised**:
+the same workflows the loop runs, as skills in your own Claude Code sessions. The **background loop** is for the
+exception: issues that are decided, self-contained and checkable by the project's own checks.
+
+| | Supervised (Claude Code plugin) | Background (`agent-loop start`) |
+|---|---|---|
+| Who answers questions | you, in the session | an issue comment, read next round |
+| Fits | new projects, design work, anything undecided | chores and well-specified issues once the architecture and tests are stable |
+| Setup | install the plugin | `agent-loop init`, labels, `.agent-loop.conf`, a running loop |
+
+Both use the same conventions (`agent/issue-<n>` branches, the `## Acceptance criteria` section, `Depends on:` /
+`Touches:` lines, `.agent-loop/prompts/project.md`), so an issue can move from one to the other.
+
+### The Claude Code plugin
+
+This repository is also a Claude Code plugin and its own marketplace:
+
+```
+/plugin install agent-loop --marketplace mrjwei/agent-loop
+```
+
+| Part | What it does |
+|---|---|
+| `implement-issue` skill | Implements an issue with you: asks about undecided points, plans, tests first, has `acceptance-reviewer` check it, then opens a PR with `## Acceptance criteria` and `Closes` / `Refs`. Uses the loop's branch and worktree names when the project has `.agent-loop.conf`, so the loop can take over fix rounds. |
+| `address-pr-feedback` skill | Resolves conflicts, fixes failing checks, weighs each review comment, updates the acceptance criteria and answers with one `🤖 agent:` comment. |
+| `plan-to-issues` skill | Compares plan documents with the issues and proposes creates, updates, `Depends on:` and `Touches:` lines; applies only what you approve. |
+| `delegate-issue` skill | Checks whether an issue is ready for the background loop (decided, acceptance criteria, self-contained, size, dependencies), fixes the gaps with you, and adds `agent-ok`. Suggests `agent-automerge` or `risk:high`, and adds them only when you say so. |
+| `harvest-lessons` skill | Groups why agents got blocked and what reviewers keep asking for (from `lessons.jsonl` and GitHub), and proposes rules for `CLAUDE.md`, `project.md` or `AGENT_EXTRA_DENY`. |
+| `acceptance-reviewer` agent | A read-only reviewer with a fresh context, with the same rules as the review workflow: only blocking findings, and every acceptance criterion checked against its evidence. |
+| Stop hook | `verify-hook.sh --plugin`: runs `AGENT_VERIFY_CMD` before Claude stops. It does nothing without that command, and it steps aside when the project already has the hook installed (`init --hook`) or inside loop runs. |
+
+The skills need `gh` and `git`. They work in any repository; `.agent-loop.conf` and `project.md` are read when present.
 
 ## Requirements
 
-- `git` ≥ 2.31, `jq`, [`gh`](https://cli.github.com) (authenticated: `gh auth login`), and the [`claude`](https://claude.com/claude-code) CLI
+- `git` ≥ 2.31, `jq` ≥ 1.6, [`gh`](https://cli.github.com) (authenticated: `gh auth login`), and the [`claude`](https://claude.com/claude-code) CLI
 - A GitHub repository with an `origin` remote. Protect the base branch so nothing can be pushed to it without a PR; the safety model relies on this.
 - macOS or Linux. Keep-awake (`caffeinate`) is macOS-only and skipped elsewhere.
 
@@ -52,7 +89,7 @@ Then:
 2. Write the project rules in `.agent-loop/prompts/project.md`.
 3. Commit `.agent-loop.conf` and `.agent-loop/` so teammates share them (the loop reads them from the main checkout).
 4. Try it without cost or changes: `agent-loop start --once --dry-run --no-triage`
-5. Label one small, well-specified issue `agent-ok`, then run `agent-loop start --no-triage`.
+5. Label one small, well-specified issue `agent-ok` (the plugin's `delegate-issue` skill checks it is ready first), then run `agent-loop start --no-triage`.
 
 ## Commands
 
@@ -293,6 +330,8 @@ The agents get three prompts: `implement`, `fix` and `triage` (in `prompts/`). T
 - **`project.md`** is inserted into all three prompts under "Project rules". Use it for commit style, documents to update, what needs a human, issue conventions. HTML comments in it are stripped.
 - **`implement.md`, `fix.md`, `triage.md`** replace the packaged prompt entirely. Placeholders: `{{N}} {{BRANCH}} {{WT}} {{PR}} {{BASE}} {{LANGUAGE}} {{TRUSTED}} {{VERIFY}} {{MARKER}} {{RESUME}} {{REASONS}} {{PLANS}} {{MAX}} {{PROJECT}}` (not every placeholder is set in every prompt).
 
+The plugin's skills (`skills/`) carry their own copies of the conventions in these prompts (acceptance-criteria evidence, `Closes` / `Refs`, `Depends on:` / `Touches:`, who counts as trusted, the `🤖 agent:` marker). When you change a convention in a prompt, change the matching skill too. `project.md` is read by both.
+
 `examples/acme_work_management/` shows a real configuration: a conf with project-specific allow/deny rules, a `project.md`, and a full `triage.md` override.
 
 ## Safety model
@@ -354,7 +393,11 @@ bin/agent-loop        entry point (dispatches to libexec/)
 libexec/              loop.sh  work.sh  triage.sh  init.sh  plan-lint.sh  stats.sh  lessons.sh  verify-hook.sh (the Stop hook)
 lib/common.sh         configuration, GitHub helpers, usage-limit handling
 prompts/              default implement / fix / triage prompts
-templates/            files `init` writes into a project (config, project rules, github/claude-code-review.yml, plan.md)
+templates/            files `init` writes into a project (config, project rules, the review workflow, plan.md)
+.claude-plugin/       plugin manifest and marketplace entry
+skills/               the plugin's skills (implement-issue, address-pr-feedback, plan-to-issues, delegate-issue, harvest-lessons)
+agents/               the plugin's acceptance-reviewer agent
+hooks/hooks.json      the plugin's Stop hook (runs libexec/verify-hook.sh --plugin)
 examples/             a real project's configuration
 test/run.sh           offline tests (fake gh and claude, no network): `make test`
 Makefile              install / uninstall / test / lint (`make lint` runs shellcheck at warning level, as CI does)

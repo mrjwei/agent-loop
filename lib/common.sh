@@ -101,8 +101,8 @@ case "$AGENT_PROMPTS_DIR" in /*) PROMPTS_DIR=$AGENT_PROMPTS_DIR ;; *) PROMPTS_DI
 # --arg assoc "$AGENT_TRUSTED_ASSOCIATIONS" --arg users "$AGENT_TRUSTED_USERS".
 # shellcheck disable=SC2016
 JQ_TRUSTED='def trusted($u; $a):
-  ($assoc | split(" ") | map(select(. != ""))) as $as | ($users | split(" ") | map(select(. != ""))) as $us
-  | (($as | index("*")) != null) or (($as | index($a // "")) != null) or (($us | index($u // "")) != null);'
+  ($assoc | split(" ") | map(select(. != ""))) as $assocs | ($users | split(" ") | map(select(. != ""))) as $us
+  | (($assocs | index("*")) != null) or (($assocs | index($a // "")) != null) or (($us | index($u // "")) != null);'
 
 AGENT_MARKER='🤖 agent:'   # comments that start with this are the agent's own and never count as "new feedback"
 L_OK=agent-ok L_WIP=agent-wip L_BLOCKED=agent-blocked L_HUMAN=human
@@ -229,7 +229,7 @@ ensure_labels() {
   local have l name color
   have=$(gh label list --limit 200 --json name -q '.[].name')
   for l in "$L_OK|07a540|An agent may work on this" "$L_WIP|fbca04|An agent is working on this, or its PR awaits review" \
-    "$L_BLOCKED|b60205|The agent stopped and needs a human decision (answer in a comment; the loop removes this label, or remove it yourself)" \
+    "$L_BLOCKED|b60205|The agent stopped and needs a human decision (answer in a comment)" \
     "$L_HUMAN|0e8a16|Work only a person can do (agent-ok is never added)" \
     "$L_AUTOMERGE|5319e7|Set by a person only: the loop merges this issue's PR itself once every condition holds" \
     "$L_RISK_HIGH|d93f0b|The PR of this issue is never merged automatically"; do
