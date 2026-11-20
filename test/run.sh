@@ -48,7 +48,9 @@ case "$*" in
   "issue list --label"*) echo '[]' | jq -r "$q" ;;
   "label list"*) if [ -n "${FAKE_LABELS_NO_RISK:-}" ]; then risk=''; else risk=',{"name":"risk:high"}'; fi
                  echo '[{"name":"agent-ok"},{"name":"agent-wip"},{"name":"agent-blocked"},{"name":"human"},{"name":"bug"},{"name":"agent-automerge"}'"$risk]" | jq -r "$q" ;;
-  "issue edit"* | "issue comment"* | "pr comment"* | "label create"*) echo "$*" >>"$GH_LOG" ;;
+  "issue edit"*) echo "$*" >>"$GH_LOG"   # keep a --body-file's text: triage deletes the file when it ends
+    prev=; for a in "$@"; do [ "$prev" = --body-file ] && cp "$a" "$FIX/edit-body-$3.md"; prev=$a; done ;;
+  "issue comment"* | "pr comment"* | "label create"*) echo "$*" >>"$GH_LOG" ;;
   "issue create"*) echo "$*" >>"$GH_LOG"; echo "https://github.com/o/r/issues/101" ;;
   "api graphql"*"after=CURSOR1"*) cat "$FIX/page2.json" ;;
   "api graphql"*) cat "$FIX/page1.json" ;;
@@ -279,6 +281,14 @@ check "triage: runs to the end" 0 $?
 check "triage: agent-ok is added for a trusted author, never for a stranger's issue" 'issue edit 6 --add-label agent-ok,bug' \
   "$(grep -E '^issue edit (6|10) ' "$GH_LOG" | tr '\n' ';' | sed 's/;$//')"
 check "triage: says why it refused" 1 "$(grep -c 'not adding agent-ok: #10 was opened by mallory' "$T/triage.out")"
+# a body may refer to an issue created earlier in the run as {{ref}} or #{{ref}}: both become #<number>, never ##<number> (#61)
+result '{"summary":"s","actions":[
+  {"op":"create","ref":"new1","title":"t","body":"b","reason":"r"},
+  {"op":"update","number":6,"body":"Depends on: #{{new1}}\nsee {{new1}}","reason":"r"}]}' >"$T/triage-refs.jsonl"
+rm -f "$FIX/edit-body-6.md"
+FAKE_CLAUDE_RESULT="$T/triage-refs.jsonl" AGENT_PLANS_GLOB='docs/plans/*.md' "$B" "$ROOT/libexec/triage.sh" >"$T/triage.out" 2>&1
+check "triage: #{{ref}} and {{ref}} both become #<number>" $'Depends on: #101\nsee #101' "$(cat "$FIX/edit-body-6.md" 2>/dev/null)"
+check "prompts: triage says the # before a ref is added for you" 1 "$(grep -c 'the `#` is added for you' "$ROOT/prompts/triage.md")"
 
 # --- work.sh: fix runs on PR #20 (issue 3), which has a failing check ---
 result '{"status":"fixed","summary":"nothing to change"}' >"$T/fix-result.jsonl"
