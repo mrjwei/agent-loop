@@ -38,8 +38,8 @@ This repository is also a Claude Code plugin and its own marketplace:
 
 | Part | What it does |
 |---|---|
-| `implement-issue` skill | Implements an issue with you: asks about undecided points, plans, tests first, has `acceptance-reviewer` check it, then opens a PR with `## Acceptance criteria` and `Closes` / `Refs`. Uses the loop's branch and worktree names when the project has `.agent-loop.conf`, so the loop can take over fix rounds. |
-| `address-pr-feedback` skill | Resolves conflicts, fixes failing checks, weighs each review comment, updates the acceptance criteria and answers with one `🤖 agent:` comment. |
+| `implement-issue` skill | Implements an issue with you: asks about undecided points, plans, tests first, tries the change end to end (with Claude Code's built-in `verify` skill when it is available), has `acceptance-reviewer` check it, then opens a PR with `## Acceptance criteria` and `Closes` / `Refs`. Uses the loop's branch and worktree names when the project has `.agent-loop.conf`, so the loop can take over fix rounds. |
+| `address-pr-feedback` skill | Resolves conflicts, fixes failing checks, weighs each review comment, tries again what a fix changed in behavior, updates the acceptance criteria and answers with one `🤖 agent:` comment. |
 | `plan-to-issues` skill | Compares plan documents with the issues and proposes creates, updates, `Depends on:` and `Touches:` lines; applies only what you approve. |
 | `delegate-issue` skill | Checks whether an issue is ready for the background loop (decided, acceptance criteria, self-contained, size, dependencies), fixes the gaps with you, and adds `agent-ok`. Suggests `agent-automerge` or `risk:high`, and adds them only when you say so. |
 | `harvest-lessons` skill | Groups why agents got blocked and what reviewers keep asking for (from `lessons.jsonl` and GitHub), and proposes rules for `CLAUDE.md`, `project.md` or `AGENT_EXTRA_DENY`. |
@@ -47,6 +47,13 @@ This repository is also a Claude Code plugin and its own marketplace:
 | Stop hook | `verify-hook.sh --plugin`: runs `AGENT_VERIFY_CMD` before Claude stops. It does nothing without that command, and it steps aside when the project already has the hook installed (`init --hook`) or inside loop runs. |
 
 The skills need `gh` and `git`. They work in any repository; `.agent-loop.conf` and `project.md` are read when present.
+
+**Checks, then trying it, then review.** The Stop hook makes the project's checks pass; `implement-issue` then drives the
+changed flow end to end, preferring Claude Code's built-in `verify` skill (which also sets up a project-specific verify
+skill the first time it runs), and writes what it observed next to the test evidence in `## Acceptance criteria`; the
+`acceptance-reviewer` then grades the criteria from a fresh context and counts such a `tried:` note as evidence it could
+not re-run. The background loop does not have this step: a headless run has no one to judge what it sees, so it relies on
+the checks and the review workflow.
 
 ## Requirements
 
