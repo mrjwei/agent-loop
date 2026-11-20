@@ -23,7 +23,9 @@ Goal: one or two sentences on what is true when this plan is done.
 
 ## Open questions
 
-- None yet. Write here what is undecided; an item that depends on an answer waits until it is decided.
+- None yet. Write here what is undecided, one question per bullet. Triage opens each as an issue labeled `human` and
+  `question`, and the items that depend on the answer wait for it (`Depends on: #<question>`). Answer it in the issue and close
+  it; the agent that picks up a waiting item records the answer in docs/decisions/.
 
 ## Items
 

@@ -90,7 +90,7 @@ agent-loop ready       # is the project ready for the loop? (verify command, bra
 | Plan template (only with `--plan`) | `docs/plans/TEMPLATE.md`, the plan format triage works best with, checked by `agent-loop plan-lint`: see "Plans" |
 | Stop hook (only with `--hook`) | `.claude/hooks/agent-loop-verify.sh`, merged into `.claude/settings.json`, for people's interactive sessions too. The loop does not need it: every agent run gets the same hook through `--settings`. |
 | Review workflow | `.github/workflows/claude-code-review.yml`, an independent review that blocks only on real findings and checks the acceptance criteria (see "Review workflow"), with `allowed_bots: 'claude'`, because PRs the loop opens run as the `claude[bot]` actor and the action otherwise fails with "Workflow initiated by non-human actor". A workflow that already exists (for example from `/install-github-app`) is kept, and gets the line if it lacks it. Skip with `--no-workflow`. |
-| Labels | `agent-ok`, `agent-wip`, `agent-blocked`, `human`, `agent-automerge`, `risk:high` (skip with `--no-labels`) |
+| Labels | `agent-ok`, `agent-wip`, `agent-blocked`, `human`, `agent-automerge`, `risk:high`, `question` (skip with `--no-labels`) |
 
 Then:
 
@@ -112,7 +112,7 @@ agent-loop triage [--dry-run]                          # sync issues with plan f
 agent-loop stats [--days N] [--json|--digest]          # outcomes, turns and cost of the finished runs (default 7 days); --digest: a short text for the last 24 hours
 agent-loop lessons [--days N]                          # why agents stopped and what reviewers asked for (default 30 days), newest first
 agent-loop plan-lint [files...]                        # check plan files (default: AGENT_PLANS_GLOB) for items triage can use; exit 1 on errors
-agent-loop labels                                      # (re)create the labels (including agent-automerge and risk:high)
+agent-loop labels                                      # (re)create the labels (including agent-automerge, risk:high and question)
 agent-loop doctor                                      # check tools, claude CLI options, gh auth and account, base branch
 agent-loop ready [--json]                              # is this project ready for the loop? (see "Is the project ready?"); exit 1 when a check fails
 agent-loop version
@@ -229,6 +229,14 @@ jobs:
 
 Triage maps the fields to labels: `Size` to `size:s`, `size:m` or `size:l`; `Risk` to `risk:low` or `risk:high`; `Owner: human` to `human`. Let triage create them with `AGENT_AUTOCREATE_LABELS='size:* risk:*'` (`risk:high` is created by `init` and `agent-loop labels`). `risk:high` also keeps the issue's PR from merging automatically (see "Auto-merge"), and triage never removes it: a person does.
 
+#### Open questions and decisions
+
+An open question in a plan used to surface late, as an `agent-blocked` issue when an agent ran into it, and its answer then lived in one issue comment that the next agent working nearby never read. So:
+
+1. **Questions become issues.** Triage turns each undecided entry of a plan's `## Open questions` section into an issue labeled `human` and `question` (never `agent-ok`), and gives every item that depends on the answer `Depends on: #<question>` and a "blocked by" link. Those items do not start while the question is open.
+2. **You answer and close it.** Write the answer in the question issue and close it; the items waiting for it become ready in the next round.
+3. **Agents record the answer.** The implement and fix prompts read `docs/decisions/` first, and when a trusted comment or a closed `question` issue settles a decision that shapes the code, the agent adds a short decision record `docs/decisions/NNNN-<slug>.md` (context, decision, link to the source) in the same PR. `docs/decisions/**` is in the default `AGENT_RISK_PATHS`, so such a PR waits for you to merge it.
+
 ### Is the project ready?
 
 "Ready for the loop" is a checklist, and a project that misses one item fails later and expensively. `agent-loop ready` checks it, prints `pass`, `WARN` or `FAIL` for each item with the fix, and exits 1 when anything fails. `--json` prints the results as an array of `{id, status, message, fix}` for other commands to use. It changes nothing on GitHub; its only side effect is a temporary worktree of the base branch, removed again.
@@ -316,6 +324,7 @@ The value is comma-separated globs (`*`, `?`, `[...]`; a `*` also matches `/`, s
 | `agent-automerge` | The loop merges this issue's PR itself once every condition in "Auto-merge" holds | **you only**. Triage never adds or removes it, and the agents cannot change labels |
 | `risk:high` | The PR of this issue is never merged automatically, whatever the policy and the label | triage (from a plan's `Risk: high`) or you; **only you remove it** |
 | `size:s`, `size:m`, `size:l`, `risk:low` | A plan item's Size and Risk, recorded on its issue (nothing in the loop reads them yet) | triage, when `AGENT_AUTOCREATE_LABELS` allows `size:* risk:*` |
+| `question` | An open question from a plan, for a person to answer; issues with `Depends on: #<it>` wait until it is closed (see "Open questions and decisions") | triage (always with `human`), or you |
 
 ### What you do
 

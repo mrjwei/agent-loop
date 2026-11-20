@@ -62,11 +62,13 @@ case "$*" in
   "label list"*) if [ -n "${FAKE_LABELS:-}" ]; then for l in $FAKE_LABELS; do jq -nc --arg n "$l" '{name: $n}'; done | jq -sc . | jq -r "$q"; exit 0; fi
                  [ -z "${FAKE_LABELS_NONE:-}" ] || { echo '[]' | jq -r "$q"; exit 0; }
                  if [ -n "${FAKE_LABELS_NO_RISK:-}" ]; then risk=''; else risk=',{"name":"risk:high"}'; fi
-                 echo '[{"name":"agent-ok"},{"name":"agent-wip"},{"name":"agent-blocked"},{"name":"human"},{"name":"bug"},{"name":"agent-automerge"}'"$risk]" | jq -r "$q" ;;
+                 echo '[{"name":"agent-ok"},{"name":"agent-wip"},{"name":"agent-blocked"},{"name":"human"},{"name":"bug"},{"name":"agent-automerge"},{"name":"question"}'"$risk]" | jq -r "$q" ;;
   "issue edit"*) echo "$*" >>"$GH_LOG"   # keep a --body-file's text: triage deletes the file when it ends
     prev=; for a in "$@"; do [ "$prev" = --body-file ] && cp "$a" "$FIX/edit-body-$3.md"; prev=$a; done ;;
   "issue comment"* | "pr comment"* | "label create"*) echo "$*" >>"$GH_LOG" ;;
-  "issue create"*) echo "$*" >>"$GH_LOG"; echo "https://github.com/o/r/issues/101" ;;
+  "issue create"*) echo "$*" >>"$GH_LOG"   # a body from stdin (--body-file -) is appended to $FIX/create-bodies.md
+    [[ " $* " == *" --body-file - "* ]] && { cat; echo; echo '----'; } >>"$FIX/create-bodies.md"
+    echo "https://github.com/o/r/issues/101" ;;
   "api graphql"*"after=CURSOR1"*) cat "$FIX/page2.json" ;;
   "api graphql"*) cat "$FIX/page1.json" ;;
   "api --paginate repos/o/r/issues/5/comments"*)
@@ -618,6 +620,8 @@ check "prompts: triage is asked for a Touches line" 1 "$(grep -c 'Touches: src/b
 check "prompts: the implement prompt requires the section and Refs for a criterion that is not done" '1|1' \
   "$(T_N=3 T_BRANCH=agent/issue-3 render_prompt implement | grep -c '## Acceptance criteria.*not done.*Refs #3')|$(T_N=3 T_BRANCH=agent/issue-3 render_prompt implement | grep -c 'If any line is `not done`, write `Refs #3`')"
 check "prompts: the fix prompt keeps the section up to date" 1 "$(T_N=3 T_PR=20 T_BRANCH=agent/issue-3 render_prompt fix | grep -c 'Keep the `## Acceptance criteria` section')"
+check "prompts: implement and fix read docs/decisions/ and record settled decisions there (#53)" '1|1|1|1' \
+  "$(T_N=3 T_BRANCH=agent/issue-3 render_prompt implement | grep -c 'decision records in `docs/decisions/`')|$(T_N=3 T_BRANCH=agent/issue-3 render_prompt implement | grep -c 'closed issue labeled `question`.*`docs/decisions/NNNN-<slug>.md`')|$(T_N=3 T_PR=20 T_BRANCH=agent/issue-3 render_prompt fix | grep -c 'decision records in `docs/decisions/`')|$(T_N=3 T_PR=20 T_BRANCH=agent/issue-3 render_prompt fix | grep -c 'record it as a short decision record.*docs/decisions/NNNN-<slug>.md')"
 open_pr() { # issue -> a command for the fake claude that "opens" a PR (number 100 + issue) on the agent branch
   echo "jq '. + [{number:$((100 + $1)),state:\"OPEN\",title:\"p\",headRefName:\"agent/issue-$1\",headRefOid:\"x\",isCrossRepository:false,mergeable:\"MERGEABLE\",statusCheckRollup:[]}]' \"\$FIX/prs.json\" >\"\$FIX/prs.new\" && mv \"\$FIX/prs.new\" \"\$FIX/prs.json\""
 }
@@ -1008,13 +1012,33 @@ FAKE_CLAUDE_RESULT="$T/triage-risk.jsonl" AGENT_PLANS_GLOB='docs/plans/*.md' "$B
 check "triage: without AGENT_AUTOCREATE_LABELS the new size and risk labels are not added" '0|1' \
   "$(grep -c 'size:s' "$GH_LOG")|$(grep -c '^issue edit 6 --add-label risk:high --remove-label bug$' "$GH_LOG")"
 : >"$GH_LOG"
+# --- A plan's open questions become question issues, and the items that wait for them depend on them (#53) ---
+check "triage prompt: open questions become human + question issues, and the items waiting for them depend on them" '1|1' \
+  "$(grep -c 'becomes one issue labeled `human` and `question`' "$ROOT/prompts/triage.md")|$(grep -c '`blocked_by` that question issue and `Depends on: #<question>`' "$ROOT/prompts/triage.md")"
+result '{"summary":"s","actions":[
+  {"op":"create","ref":"q1","title":"Which CSV dialects do we accept?","body":"From docs/plans/p.md, Open questions","labels":["question","agent-ok"],"reason":"r"},
+  {"op":"create","ref":"i1","title":"Upload a CSV","body":"Depends on: #{{q1}}","labels":["agent-ok"],"blocked_by":["q1"],"reason":"r"},
+  {"op":"update","number":6,"add_labels":["question"],"reason":"r"}]}' >"$T/triage-q.jsonl"
+: >"$GH_LOG"; rm -f "$FIX/create-bodies.md"
+FAKE_CLAUDE_RESULT="$T/triage-q.jsonl" AGENT_PLANS_GLOB='docs/plans/*.md' "$B" "$ROOT/libexec/triage.sh" >"$T/triage.out" 2>&1
+check "question: the question issue is labeled question and human, never agent-ok" 1 \
+  "$(grep -c '^issue create --title Which CSV dialects do we accept? --body-file - --label question,human$' "$GH_LOG")"
+check "question: the item that waits for it gets Depends on: #<question> and the dependency" '1|1|1' \
+  "$(grep -c '^issue create --title Upload a CSV --body-file - --label agent-ok$' "$GH_LOG")|$(grep -c '^Depends on: #101$' "$FIX/create-bodies.md")|$(grep -c 'dependency #101 <- #101' "$T/triage.out")"
+check "question: an existing issue that becomes a question also becomes human" 1 "$(grep -c '^issue edit 6 --add-label question,human$' "$GH_LOG")"
+check "question: the plan template and project.md template say how questions and decisions work" '1|1' \
+  "$(grep -c 'labeled `human` and$' "$ROOT/templates/plan.md")|$(grep -c 'docs/decisions/NNNN-<slug>.md' "$ROOT/templates/project.md")"
+: >"$GH_LOG"
+FAKE_LABELS_NONE=1 ensure_labels
+check "labels: question is created with the others" 1 "$(grep -c '^label create question --color d876e3 ' "$GH_LOG")"
+: >"$GH_LOG"
 FAKE_LABELS_NO_RISK=1 ensure_labels
 check "labels: risk:high is created with the others" '1|1' \
   "$(grep -c '^label create risk:high --color d93f0b --description The PR of this issue is never merged automatically$' "$GH_LOG")|$(wc -l <"$GH_LOG" | tr -d ' ')"
 : >"$GH_LOG"
 # GitHub rejects a label description over 100 characters, and the label is then never created (#62)
 FAKE_LABELS_NONE=1 ensure_labels
-check "labels: every description fits GitHub's 100-character limit" '6|' \
+check "labels: every description fits GitHub's 100-character limit" '7|' \
   "$(grep -c '^label create ' "$GH_LOG")|$(sed -n 's/^label create \([^ ]*\) .* --description //p' "$GH_LOG" | awk 'length > 100')"
 : >"$GH_LOG"
 

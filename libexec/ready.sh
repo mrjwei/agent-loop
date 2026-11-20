@@ -131,8 +131,8 @@ check_labels() {
   if ! have=$(gh label list --limit 200 --json name -q '.[].name' 2>/dev/null); then
     res labels warn "could not list the repository's labels (is gh authenticated, and does the repository have a GitHub remote?)"; return
   fi
-  # shellcheck disable=SC2153  # L_RISK_HIGH exists only in versions that have the risk policy
-  for l in $L_OK $L_WIP $L_BLOCKED $L_HUMAN $L_AUTOMERGE ${L_RISK_HIGH:-}; do
+  # shellcheck disable=SC2153  # L_RISK_HIGH and L_QUESTION exist only in versions that have them
+  for l in $L_OK $L_WIP $L_BLOCKED $L_HUMAN $L_AUTOMERGE ${L_RISK_HIGH:-} ${L_QUESTION:-}; do
     echo "$have" | grep -qxF -- "$l" || missing="$missing${missing:+, }$l"
   done
   if [ -z "$missing" ]; then res labels pass "the loop's labels exist"

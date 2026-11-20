@@ -109,7 +109,7 @@ filter_labels() { # one label per line in -> only the labels that may be used
   while IFS= read -r l; do
     [ -n "$l" ] || continue
     if [ "$l" = "$L_WIP" ] || [ "$l" = "$L_BLOCKED" ] || [ "$l" = "$L_AUTOMERGE" ]; then log "  label $l is never added or removed"; continue; fi
-    if echo "$known_labels" | grep -qx "$l" || [ "$l" = "$L_OK" ] || [ "$l" = "$L_HUMAN" ]; then echo "$l"; continue; fi
+    if echo "$known_labels" | grep -qx "$l" || [ "$l" = "$L_OK" ] || [ "$l" = "$L_HUMAN" ] || [ "$l" = "$L_QUESTION" ]; then echo "$l"; continue; fi
     ok=0
     # shellcheck disable=SC2254
     for g in $AGENT_AUTOCREATE_LABELS; do case "$l" in $g) ok=1 ;; esac; done
@@ -147,6 +147,8 @@ jq -c ".structured_output.actions[:$AGENT_TRIAGE_MAX_ACTIONS][]" "$out" | while 
     [ -n "$title" ] || { log "Skipping a create proposal with no title"; continue; }
     body=$(subst_refs "$(echo "$a" | jq -r '.body // ""')")
     labels=$(echo "$a" | jq -r '.labels[]?' | filter_labels)
+    # a question is for a person to answer: it is also labeled human, and never agent-ok
+    echo "$labels" | grep -qx "$L_QUESTION" && ! echo "$labels" | grep -qx "$L_HUMAN" && labels=$(printf '%s\n%s' "$labels" "$L_HUMAN")
     echo "$labels" | grep -qx "$L_HUMAN" && labels=$(echo "$labels" | grep -vx "$L_OK" || true)
     log "Create: $title [${labels//$'\n'/,}] - $why"
     if [ "${DRY:-0}" = 1 ]; then
@@ -184,6 +186,7 @@ jq -c ".structured_output.actions[:$AGENT_TRIAGE_MAX_ACTIONS][]" "$out" | while 
       fi
       add=$(echo "$a" | jq -r '.add_labels[]?' | filter_labels)
       rem=$(echo "$a" | jq -r '.remove_labels[]?' | grep -vx -e "$L_HUMAN" -e "$L_WIP" -e "$L_BLOCKED" -e "$L_AUTOMERGE" -e "$L_RISK_HIGH" || true)
+      echo "$add" | grep -qx "$L_QUESTION" && [ "$cur_human" != true ] && ! echo "$add" | grep -qx "$L_HUMAN" && add=$(printf '%s\n%s' "$add" "$L_HUMAN")
       if [ "$cur_human" = true ] || echo "$add" | grep -qx "$L_HUMAN"; then
         echo "$add" | grep -qx "$L_OK" && log "  not adding $L_OK to a $L_HUMAN issue"
         add=$(echo "$add" | grep -vx "$L_OK" || true)
