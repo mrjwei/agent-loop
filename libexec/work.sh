@@ -100,7 +100,10 @@ ts=$(date +%Y%m%d-%H%M%S)
 stream="$STATE/logs/issue-$n-$ts-$mode.jsonl"   # the whole conversation
 out="${stream%.jsonl}.json"                      # the final result only
 # The last attempt (AGENT_MAX_ATTEMPTS) or fix round (AGENT_MAX_FIXES) may use a stronger model and more effort
-run_model=$AGENT_MODEL run_effort=$AGENT_EFFORT
+# The issue's size:s|m|l label picks the model, effort and turn limit (AGENT_SIZE_S|M|L); escalation still replaces
+# model and effort on the last attempt or round
+size=$(issue_size "$n")
+read -r run_model run_effort run_turns <<<"$(size_settings "$size")"
 if [ "$escalate" = 1 ]; then
   [ -z "$AGENT_ESCALATE_MODEL" ] || run_model=$AGENT_ESCALATE_MODEL
   [ -z "$AGENT_ESCALATE_EFFORT" ] || run_effort=$AGENT_ESCALATE_EFFORT
@@ -114,14 +117,14 @@ if [ -n "$AGENT_MAX_COST_PER_RUN" ]; then
   if claude_has_cost_cap; then cost_args=(--max-budget-usd "$AGENT_MAX_COST_PER_RUN")
   else log "#$n: warning: this claude CLI has no --max-budget-usd, so AGENT_MAX_COST_PER_RUN is skipped"; fi
 fi
-log "#$n: starting $mode ($run_model / ${run_effort}$([ "$escalate" = 1 ] && echo ", last chance"), worktree ${wt}, limit ${AGENT_RUN_TIMEOUT}s)"
+log "#$n: starting $mode ($run_model / ${run_effort} / ${run_turns} turns, size ${size:-none}$([ "$escalate" = 1 ] && echo ", last chance"), worktree ${wt}, limit ${AGENT_RUN_TIMEOUT}s)"
 rc=0 timed_out=0
 # The agent runs as the leader of its own process group (a background subshell under job control), so that the
 # timeout below can stop claude and everything it started without stopping this script
 set -m
 (printf '%s' "$prompt" | without_credentials claude -p --strict-mcp-config \
   --model "$run_model" --effort "$run_effort" \
-  --permission-mode "$AGENT_PERMISSION_MODE" --max-turns "$AGENT_MAX_TURNS" --settings "$(agent_settings)" \
+  --permission-mode "$AGENT_PERMISSION_MODE" --max-turns "$run_turns" --settings "$(agent_settings)" \
   --allowedTools "${WORKER_ALLOW[@]}" --disallowedTools "${WORKER_DENY[@]}" ${cost_args[@]+"${cost_args[@]}"} \
   --output-format stream-json --verbose --json-schema "$WORKER_SCHEMA" --name "agent #$n $mode") \
   >"$stream" 2>"$out.stderr" &
@@ -172,17 +175,19 @@ record_run() {
   local turns cost
   turns=$(jq -r '.num_turns // 0' "$out" 2>/dev/null || true); cost=$(jq -r '.total_cost_usd // 0' "$out" 2>/dev/null || true)
   history_add "$(jq -nc --arg run "$(basename "${out%.json}")" --arg t "$(now_iso)" --argjson n "$n" --arg mode "$mode" \
-    --arg outcome "$outcome" --arg status "$status" --arg pr "${pr_now:-$pr}" --arg model "$run_model" \
+    --arg outcome "$outcome" --arg status "$status" --arg pr "${pr_now:-$pr}" --arg model "$run_model" --arg size "${size:-}" \
     --arg reason "${reason:-}" --argjson timed_out "$([ "$timed_out" = 1 ] && echo true || echo false)" \
     --argjson turns "${turns:-0}" --argjson cost "${cost:-0}" \
     '{run: $run, time: $t, issue: $n, mode: $mode, outcome: $outcome, status: (if $status == "" then null else $status end),
-      pr: (if $pr == "" then null else ($pr | tonumber) end), turns: $turns, cost: $cost, model: $model, timed_out: $timed_out,
+      pr: (if $pr == "" then null else ($pr | tonumber) end), turns: $turns, cost: $cost, model: $model, size: (if $size == "" then null else $size end), timed_out: $timed_out,
       reason: (if $reason == "" then null else $reason[0:300] end)}' 2>/dev/null)" || true
 }
 trap 'rm -f "$pf"; record_run' EXIT
 # How the run ended, for the next attempt's prompt (previous_run_note)
 if [ "$timed_out" = 1 ]; then end_note="it was stopped after ${AGENT_RUN_TIMEOUT}s (AGENT_RUN_TIMEOUT)"
-elif [ "$(jq -r '.subtype // empty' "$out" 2>/dev/null)" = error_max_turns ]; then end_note="it hit the turn limit (AGENT_MAX_TURNS=$AGENT_MAX_TURNS)"
+elif [ "$(jq -r '.subtype // empty' "$out" 2>/dev/null)" = error_max_turns ]; then
+  if [ -n "$size" ]; then end_note="it hit the turn limit ($run_turns turns, from AGENT_SIZE_$(echo "$size" | tr '[:lower:]' '[:upper:]') or AGENT_MAX_TURNS)"
+  else end_note="it hit the turn limit (AGENT_MAX_TURNS=$run_turns)"; fi
 elif [ -f "$verify_mark" ]; then end_note="the checks (AGENT_VERIFY_CMD) were still failing when it stopped"
 elif [ "$limited" = 1 ]; then end_note="it was stopped by a usage limit"
 elif [ -n "$status" ]; then end_note="it reported status: $status"
