@@ -46,7 +46,8 @@ case "$*" in
   "pr list --state open"*) jq '[.[] | select(.state == "OPEN")]' "$FIX/prs.json" | jq -r "$q" ;;
   "issue list --state closed"*) echo '[]' ;;
   "issue list --label"*) echo '[]' | jq -r "$q" ;;
-  "label list"*) if [ -n "${FAKE_LABELS_NO_RISK:-}" ]; then risk=''; else risk=',{"name":"risk:high"}'; fi
+  "label list"*) [ -z "${FAKE_LABELS_NONE:-}" ] || { echo '[]' | jq -r "$q"; exit 0; }
+                 if [ -n "${FAKE_LABELS_NO_RISK:-}" ]; then risk=''; else risk=',{"name":"risk:high"}'; fi
                  echo '[{"name":"agent-ok"},{"name":"agent-wip"},{"name":"agent-blocked"},{"name":"human"},{"name":"bug"},{"name":"agent-automerge"}'"$risk]" | jq -r "$q" ;;
   "issue edit"*) echo "$*" >>"$GH_LOG"   # keep a --body-file's text: triage deletes the file when it ends
     prev=; for a in "$@"; do [ "$prev" = --body-file ] && cp "$a" "$FIX/edit-body-$3.md"; prev=$a; done ;;
@@ -919,6 +920,11 @@ check "init --force: replaces it with the template" same "$(cmp -s "$TPL" "$T/pr
 FAKE_LABELS_NO_RISK=1 ensure_labels
 check "labels: risk:high is created with the others" '1|1' \
   "$(grep -c '^label create risk:high --color d93f0b --description The PR of this issue is never merged automatically$' "$GH_LOG")|$(wc -l <"$GH_LOG" | tr -d ' ')"
+: >"$GH_LOG"
+# GitHub rejects a label description over 100 characters, and the label is then never created (#62)
+FAKE_LABELS_NONE=1 ensure_labels
+check "labels: every description fits GitHub's 100-character limit" '6|' \
+  "$(grep -c '^label create ' "$GH_LOG")|$(sed -n 's/^label create \([^ ]*\) .* --description //p' "$GH_LOG" | awk 'length > 100')"
 : >"$GH_LOG"
 
 
