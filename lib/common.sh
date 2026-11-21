@@ -112,6 +112,7 @@ AGENT_MARKER='🤖 agent:'   # comments that start with this are the agent's own
 L_OK=agent-ok L_WIP=agent-wip L_BLOCKED=agent-blocked L_HUMAN=human
 L_AUTOMERGE=agent-automerge   # set only by a person; the loop merges the PR of such an issue when every condition holds
 L_RISK_HIGH=risk:high         # a person (or triage, from a plan's "Risk: high") marks an issue whose PR must never be merged automatically
+L_QUESTION=question           # an open question from a plan (triage), for a person to answer; issues that depend on it wait until it is closed
 
 mkdir -p "$STATE/running" "$STATE/count" "$STATE/stamp" "$STATE/logs"
 
@@ -236,7 +237,8 @@ ensure_labels() {
     "$L_BLOCKED|b60205|The agent stopped and needs a human decision (answer in a comment)" \
     "$L_HUMAN|0e8a16|Work only a person can do (agent-ok is never added)" \
     "$L_AUTOMERGE|5319e7|Set by a person only: the loop merges this issue's PR itself once every condition holds" \
-    "$L_RISK_HIGH|d93f0b|The PR of this issue is never merged automatically"; do
+    "$L_RISK_HIGH|d93f0b|The PR of this issue is never merged automatically" \
+    "$L_QUESTION|d876e3|An open question for a person; answer it, then close it, and the issues that depend on it start"; do
     name=${l%%|*}
     echo "$have" | grep -qxF -- "$name" && continue
     color=${l#*|}; color=${color%%|*}

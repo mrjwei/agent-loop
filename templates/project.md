@@ -7,6 +7,8 @@ Project rules for the agents. This file's text is inserted into the implement, f
 - What needs a human and must be reported as `blocked` (production access, design decisions, manual QA)
 - Issue conventions for triage (title format, required sections such as acceptance criteria)
 - Anything an agent must never run in this project
+- Decisions: the agents record settled decisions (answers in comments, closed `question` issues) in docs/decisions/NNNN-<slug>.md
+  and read that folder first. Say here if your project keeps decisions somewhere else, or wants a different format.
 
 To replace a whole prompt instead, put implement.md, fix.md or triage.md next to this file.
 Placeholders: {{N}} {{BRANCH}} {{WT}} {{PR}} {{BASE}} {{LANGUAGE}} {{TRUSTED}} {{VERIFY}} {{MARKER}} {{RESUME}} {{REASONS}} {{PLANS}} {{MAX}} {{PROJECT}}
