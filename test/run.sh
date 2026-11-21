@@ -50,6 +50,8 @@ case "$*" in
   "pr list --head "*) # --head <branch> --state <state>
     jq --arg b "$4" --arg s "$6" '[.[] | select(.headRefName == $b and ($s == "all" or (.state | ascii_downcase) == $s))]' "$FIX/prs.json" | jq -r "$q" ;;
   "pr view "*" --json body"*) f="$FIX/pr-body-$3.txt"; if [ -f "$f" ]; then cat "$f"; fi ;;
+  "pr view "*" --json createdAt"*) f="$FIX/pr-times-$3.json"; if [ -f "$f" ]; then cat "$f"; else exit 1; fi ;;
+  "pr view "*" --json headRefName"*) f="$FIX/pr-head-$3.txt"; if [ -f "$f" ]; then cat "$f"; else exit 1; fi ;;
   "pr view "*" --json files"*) f="$FIX/pr-files-$3.json"; if [ -f "$f" ]; then jq -r "$q" "$f"; else echo '{"files":[]}' | jq -r "$q"; fi ;;
   "pr merge"*) echo "$*" >>"$GH_LOG"; [ -z "${FAKE_MERGE_FAIL:-}" ] || exit 1 ;;
   "pr list --state merged"*) cat "$FIX/merged.json" ;;
@@ -59,6 +61,8 @@ case "$*" in
   "pr list --state open"*) jq '[.[] | select(.state == "OPEN")]' "$FIX/prs.json" | jq -r "$q" ;;
   "issue list --state closed"*) echo '[]' ;;
   "issue list --label"*) echo '[]' | jq -r "$q" ;;
+  "issue list --state open --label "*) # the digest's lists: FAKE_BLOCKED_ISSUES and FAKE_QUESTION_ISSUES (JSON arrays)
+    case "$6" in agent-blocked) echo "${FAKE_BLOCKED_ISSUES:-[]}" ;; question) echo "${FAKE_QUESTION_ISSUES:-[]}" ;; *) echo '[]' ;; esac | jq -r "$q" ;;
   "label list"*) if [ -n "${FAKE_LABELS:-}" ]; then for l in $FAKE_LABELS; do jq -nc --arg n "$l" '{name: $n}'; done | jq -sc . | jq -r "$q"; exit 0; fi
                  [ -z "${FAKE_LABELS_NONE:-}" ] || { echo '[]' | jq -r "$q"; exit 0; }
                  if [ -n "${FAKE_LABELS_NO_RISK:-}" ]; then risk=''; else risk=',{"name":"risk:high"}'; fi
@@ -330,6 +334,7 @@ check "loop: a merged PR with an open issue is reported on the issue" 1 \
 check "loop: and the same round does not start that issue again" '7 8' \
   "$(echo "$out" | sed -n 's/.*start implement for #\([0-9]*\).*/\1/p' | tr '\n' ' ' | sed 's/ $//')"
 : >"$GH_LOG"
+echo '{"createdAt":"2026-01-01T00:00:00Z","mergedAt":"2026-01-01T05:00:00Z","closedAt":"2026-01-01T05:00:00Z","mergedBy":{"login":"alice"}}' >"$FIX/pr-times-9.json"
 AGENT_MAX_PARALLEL=0 tick >/dev/null   # for real, with no slot to start agents in
 check "loop: cleanup removes the labels, comments once and deletes the branch" 'issue edit 1 --remove-label agent-ok|1|gone' \
   "$(grep -m1 'remove-label agent-ok' "$GH_LOG")|$(grep -c '^issue comment 1 ' "$GH_LOG")|$(git -C "$T/proj" rev-parse -q --verify agent/issue-1 >/dev/null || echo gone)"
@@ -338,6 +343,17 @@ git -C "$T/proj" branch agent/issue-1   # agent-ok was added again and new work 
 AGENT_MAX_PARALLEL=0 tick >/dev/null
 check "loop: the handled PR does not clean up the new work" 'kept|0' \
   "$(git -C "$T/proj" rev-parse -q --verify agent/issue-1 >/dev/null && echo kept)|$(wc -l <"$GH_LOG" | tr -d ' ')"
+check "history: the merged PR left one pr event with its times and who merged it (#52)" '1|merged|alice|2026-01-01T00:00:00Z|2026-01-01T05:00:00Z' \
+  "$(grep -c '"run":"pr-9"' "$HISTORY_FILE")|$(grep '"run":"pr-9"' "$HISTORY_FILE" | jq -r '[.outcome, .merged_by, .opened, .closed] | join("|")')"
+# a merged revert PR that names an agent PR adds one reverted event; one that names another PR adds nothing
+printf '%s\n' '[{"number":300,"title":"Revert \"Fix a thing (#9)\"","body":"Reverts o/r#9","mergedAt":"2026-01-02T00:00:00Z"},
+  {"number":301,"title":"Revert \"Human change (#5)\"","body":"Reverts o/r#5","mergedAt":"2026-01-02T00:00:00Z"},
+  {"number":302,"title":"Add billing","body":"Reverts nothing","mergedAt":"2026-01-02T00:00:00Z"}]' >"$FIX/merged.json"
+echo agent/issue-1 >"$FIX/pr-head-9.txt"; echo feature/x >"$FIX/pr-head-5.txt"
+for _ in 1 2; do AGENT_MAX_PARALLEL=0 tick >/dev/null; done
+check "history: a revert of an agent PR is recorded once, with the PR, the issue and the revert PR" '1|9|1|300|0|0' \
+  "$(grep -c '"outcome":"reverted"' "$HISTORY_FILE")|$(grep '"outcome":"reverted"' "$HISTORY_FILE" | jq -r '[.pr, .issue, .revert_pr] | join("|")')|$(grep -c '"run":"revert-301"' "$HISTORY_FILE")|$(grep -c '"run":"revert-302"' "$HISTORY_FILE")"
+echo '[]' >"$FIX/merged.json"; rm -f "$FIX/pr-head-9.txt" "$FIX/pr-head-5.txt"
 
 # --- Notifications: GitHub mentions and AGENT_NOTIFY_CMD ---
 cat >"$T/notify.sh" <<'EOF'
@@ -658,6 +674,13 @@ res "issue-84-20200101-010101-implement" pr_opened 9 99 99
   echo '{"run":"issue-81-'"$d"'-010101-implement","time":"'"$(now_iso)"'","issue":81,"mode":"implement","outcome":"pr_opened","status":"pr_opened","pr":201,"turns":10,"cost":1.5}'; } >"$S2/history.jsonl"
 { echo '{"time":"'"$(now_iso)"'","issue":9,"mode":"implement","type":"blocked","reason":"needs a decision\nsecond line"}'
   echo '{"time":"2020-01-01T00:00:00Z","issue":8,"mode":"fix","type":"blocked","reason":"ancient"}'; } >"$S2/lessons.jsonl"
+ago() { jq -nr --argjson h "$1" '(now - $h * 3600) | todate'; }   # hours ago -> ISO time
+{ printf '{"run":"pr-201","time":"%s","issue":81,"mode":"pr","pr":201,"outcome":"merged","opened":"%s","closed":"%s","merged_by":"loop","risk":"low","turns":0,"cost":0}\n' "$(ago 1)" "$(ago 11)" "$(ago 1)"
+  printf '{"run":"pr-203","time":"%s","issue":83,"mode":"pr","pr":203,"outcome":"merged","opened":"%s","closed":"%s","merged_by":"alice","risk":null,"turns":0,"cost":0}\n' "$(ago 2)" "$(ago 4)" "$(ago 2)"
+  printf '{"run":"pr-206","time":"%s","issue":86,"mode":"pr","pr":206,"outcome":"merged","opened":"%s","closed":"%s","merged_by":"alice","risk":"high","turns":0,"cost":0}\n' "$(ago 3)" "$(ago 33)" "$(ago 3)"
+  printf '{"run":"pr-207","time":"%s","issue":87,"mode":"pr","pr":207,"outcome":"closed","opened":"%s","closed":"%s","merged_by":null,"risk":null,"turns":0,"cost":0}\n' "$(ago 3)" "$(ago 5)" "$(ago 3)"
+  printf '{"run":"revert-300","time":"%s","issue":81,"mode":"pr","pr":201,"outcome":"reverted","revert_pr":300,"turns":0,"cost":0}\n' "$(ago 0.5)"
+  echo '{"run":"pr-9","time":"2020-01-01T00:00:00Z","issue":1,"mode":"pr","pr":9,"outcome":"merged","opened":"2019-12-01T00:00:00Z","closed":"2020-01-01T00:00:00Z","merged_by":"loop","turns":0,"cost":0}'; } >>"$S2/history.jsonl"
 stats() { AGENT_REPO="$T/proj2" "$ROOT/bin/agent-loop" stats "$@" 2>&1; }
 j=$(stats --json)
 check "stats --json: valid JSON" true "$(echo "$j" | jq -e . >/dev/null 2>&1 && echo true || echo false)"
@@ -676,6 +699,23 @@ check "stats: --days leaves out older runs and a longer period includes them" '8
 out=$(stats --digest)
 check "stats --digest: PRs opened, blocked issues with their reasons, PRs waiting, spend" '1|1|1|1' \
   "$(echo "$out" | grep -c '^PRs opened: 3 (#201, #203, #206)')|$(echo "$out" | grep -c '^  #9: needs a decision$')|$(echo "$out" | grep -c '^  PR #20 (issue #3)')|$(echo "$out" | grep -c 'Spend (API-equivalent): \$8.75')"
+check "stats: merges, time to merge (median, 90th percentile), the share merged by the loop, reverts (#52)" '3|1|10|30|1|0.33|1|[201]' \
+  "$(echo "$j" | jq -r '[.prs_merged, .prs_closed, .merge_hours_median, .merge_hours_p90, .merged_by_loop, .merged_by_loop_share, .reverts, (.reverted_prs | tojson)] | join("|")')"
+out=$(stats)
+check "stats: the text output has the merge numbers" '1|1|1' \
+  "$(echo "$out" | grep -c '^PRs merged: 3 (1 by the loop, 33%), closed without merging: 1$')|$(echo "$out" | grep -c '^Time to merge: median 10h, 90th percentile 30h$')|$(echo "$out" | grep -c '^Reverted: 1 (#201)$')"
+check "stats: pr events are not runs" '8' "$(stats --json | jq .runs_total)"
+out=$(FAKE_BLOCKED_ISSUES='[{"number":12,"title":"Needs a key"}]' FAKE_QUESTION_ISSUES='[{"number":14,"title":"Which dialect?"}]' stats --digest)
+check "stats --digest: waiting for you (PRs, blocked issues, questions), merged by the loop, reverts" '1|1|1|1|1' \
+  "$(echo "$out" | grep -c '^  PR #20 (issue #3): waiting for review$')|$(echo "$out" | grep -c '^  #12 blocked: Needs a key$')|$(echo "$out" | grep -c '^  #14 question: Which dialect?$')|$(echo "$out" | grep -c '^Merged by the loop: #201$')|$(echo "$out" | grep -c '^Reverted: #201$')"
+mkdir -p "$S2/stamp"; echo high >"$S2/stamp/risk-3"
+check "stats --digest: with the risk policy, a high-risk PR is listed as such" 1 \
+  "$(AGENT_AUTOMERGE_POLICY=risk stats --digest | grep -c '^  PR #20 (issue #3): high risk$')"
+echo low >"$S2/stamp/risk-3"
+check "stats --digest: ... and a low-risk PR is not waiting for you" 0 "$(AGENT_AUTOMERGE_POLICY=risk stats --digest | grep -c 'PR #20')"
+rm -f "$S2/stamp/risk-3"
+check "stats --digest: ... and one the loop has not judged yet says so" 1 \
+  "$(AGENT_AUTOMERGE_POLICY=shadow stats --digest | grep -c '^  PR #20 (issue #3): risk not judged yet$')"
 stats --days x >/dev/null; check "stats: a bad --days is refused" 1 $?
 git init -q -b main "$T/proj3"
 check "stats: with no runs it prints zeros and dashes" '0|0|1|1' \
@@ -766,6 +806,8 @@ check "automerge: AGENT_AUTOMERGE=0 ignores the label" 0 "$(AGENT_AUTOMERGE=0 am
 # for real: one merge, one announcement, one notification; a failed merge is retried and says nothing on GitHub
 : >"$GH_LOG"; : >"$NOTIFY_OUT"
 AGENT_NOTIFY=1 AGENT_NOTIFY_USER=alice AGENT_NOTIFY_CMD="$T/notify.sh" AGENT_MAX_PARALLEL=0 tick >"$T/am.out" 2>&1
+check "automerge: the merge and the judged risk are remembered for the PR's history event (#52)" '190|low' \
+  "$(cat "$STATE/stamp/automerged-90" 2>/dev/null)|$(cat "$STATE/stamp/risk-90" 2>/dev/null)"
 check "automerge: the loop merges, announces on the PR and notifies" '1|1|1' \
   "$(grep -c '^pr merge 190 --squash --match-head-commit abc123' "$GH_LOG")|$(grep -c '^pr comment 190 .*Merged automatically (squash).* @alice' "$GH_LOG")|$(grep -c '^PR merged (#90)|PR #190 was merged automatically (squash)|https://github.com/o/r/pull/190' "$NOTIFY_OUT")"
 : >"$GH_LOG"
