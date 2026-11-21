@@ -69,6 +69,9 @@ case "$*" in
   "issue create"*) echo "$*" >>"$GH_LOG"   # a body from stdin (--body-file -) is appended to $FIX/create-bodies.md
     [[ " $* " == *" --body-file - "* ]] && { cat; echo; echo '----'; } >>"$FIX/create-bodies.md"
     echo "https://github.com/o/r/issues/101" ;;
+  "issue view "*" --json labels"*) # the labels of an issue: FAKE_ISSUE_LABELS (space-separated); FAKE_ISSUE_VIEW_FAIL=1 fails
+    [ -z "${FAKE_ISSUE_VIEW_FAIL:-}" ] || exit 1
+    for l in ${FAKE_ISSUE_LABELS:-}; do jq -nc --arg n "$l" '{name: $n}'; done | jq -sc '{labels: .}' | jq -r "$q" ;;
   "api graphql"*"after=CURSOR1"*) cat "$FIX/page2.json" ;;
   "api graphql"*) cat "$FIX/page1.json" ;;
   "api --paginate repos/o/r/issues/5/comments"*)
@@ -509,7 +512,7 @@ FAKE_CLAUDE_ARGS="$T/claude.args" FAKE_CLAUDE_PROMPT="$T/prompt3.txt" FAKE_CLAUD
   "$B" "$ROOT/libexec/work.sh" 53 >"$T/work3.out" 2>&1
 check "work: the last attempt uses AGENT_ESCALATE_MODEL / AGENT_ESCALATE_EFFORT" 'model-big max' "$(model_effort "$T/claude.args" 3)"
 check "work: the log line that starts a run names the model actually used" '1|1' \
-  "$(grep -c 'starting implement (model-a / low, ' "$T/work1.out")|$(grep -c 'starting implement (model-big / max, last chance' "$T/work3.out")"
+  "$(grep -c 'starting implement (model-a / low / 150 turns, size none, ' "$T/work1.out")|$(grep -c 'starting implement (model-big / max / 150 turns, size none, last chance' "$T/work3.out")"
 check "work: the first attempt's prompt has no previous-run section" 0 "$(grep -c 'About the previous run' "$T/prompt1.txt")"
 check "work: a later attempt's prompt carries the previous summary, reason and how it ended" '1|1|1' \
   "$(grep -c 'Its summary: first attempt summary' "$T/prompt2.txt")|$(grep -c 'Its blocked_reason: first attempt reason' "$T/prompt2.txt")|$(grep -c 'How it ended: it reported status: failed' "$T/prompt2.txt")"
@@ -541,6 +544,32 @@ check "work: the last fix round uses the escalation model, earlier ones do not" 
   "$(model_effort "$T/claude.args" 1 | cut -d' ' -f1) $(model_effort "$T/claude.args" 2 | cut -d' ' -f1)"
 check "work: a later fix round's prompt carries the previous fix's summary" 1 "$(grep -c 'Its summary: first fix summary' "$T/fixprompt2.txt")"
 count_reset fixes 3
+# --- The issue's size label picks model, effort and turns (#51) ---
+model_effort_turns() { sed -n "$2p" "$1" | sed 's/.*--model \([^ ]*\) --effort \([^ ]*\) .*--max-turns \([^ ]*\) .*/\1 \2 \3/'; }
+sized() { # labels [extra env...]: one implement run of #56 with the size settings below; prints its model, effort and turns
+  local labels=$1; shift
+  : >"$T/claude.args"
+  env FAKE_ISSUE_LABELS="$labels" FAKE_CLAUDE_ARGS="$T/claude.args" FAKE_CLAUDE_RESULT="$T/failed-result.jsonl" \
+    AGENT_MODEL=model-a AGENT_EFFORT=high AGENT_MAX_TURNS=150 AGENT_MAX_ATTEMPTS=5 \
+    AGENT_SIZE_S='model-s low 40' AGENT_SIZE_M='- medium 90' AGENT_SIZE_L='model-l max 300' "$@" \
+    "$B" "$ROOT/libexec/work.sh" 56 >"$T/sized.out" 2>&1
+  model_effort_turns "$T/claude.args" 1
+  drop_work 56
+}
+check "size: size:s, SIZE:M (any case, '-' keeps the model) and size:l pick their settings" \
+  'model-s low 40|model-a medium 90|model-l max 300' "$(sized 'bug size:s')|$(sized 'SIZE:M')|$(sized 'size:l agent-ok')"
+check "size: no size label, or gh failing, keeps the defaults" 'model-a high 150|model-a high 150' \
+  "$(sized 'bug')|$(sized 'size:s' FAKE_ISSUE_VIEW_FAIL=1)"
+check "size: an empty setting for the size keeps the defaults; turns that are not a number keep AGENT_MAX_TURNS" \
+  'model-a high 150|model-x high 150' "$(sized 'size:s' AGENT_SIZE_S=)|$(sized 'size:s' AGENT_SIZE_S='model-x - lots')"
+check "size: escalation still replaces model and effort on the last attempt, and the size keeps its turns" 'model-big max 40' \
+  "$(sized 'size:s' AGENT_MAX_ATTEMPTS=1 AGENT_ESCALATE_MODEL=model-big AGENT_ESCALATE_EFFORT=max)"
+sized 'size:m' >/dev/null
+check "size: the log line names the size and the turns" 1 "$(grep -c 'starting implement (model-a / medium / 90 turns, size m, ' "$T/sized.out")"
+check "size: the run's line in history.jsonl has the size" 'm' "$(tail -1 "$HISTORY_FILE" | jq -r .size)"
+sized 'bug' >/dev/null
+check "size: ... and null without a size label" 'null' "$(tail -1 "$HISTORY_FILE" | jq -r .size)"
+: >"$T/claude.args"
 check "prompts: the packaged implement and fix prompts have the resume placeholder" '1|1' \
   "$(grep -c '{{RESUME}}' "$ROOT/prompts/implement.md")|$(grep -c '{{RESUME}}' "$ROOT/prompts/fix.md")"
 : >"$GH_LOG"
