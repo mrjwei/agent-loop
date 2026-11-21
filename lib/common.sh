@@ -45,6 +45,10 @@ AGENT_POLL_SECONDS=${AGENT_POLL_SECONDS:-300}             # how often to look at
 AGENT_MAX_ATTEMPTS=${AGENT_MAX_ATTEMPTS:-2}               # implementation attempts before agent-blocked
 AGENT_MAX_FIXES=${AGENT_MAX_FIXES:-3}                     # fix rounds per PR before agent-blocked
 AGENT_MAX_TURNS=${AGENT_MAX_TURNS:-150}
+# Per issue size (the issue's size:s|m|l label): 'model effort turns', '-' keeps the default for that field (empty = defaults)
+AGENT_SIZE_S=${AGENT_SIZE_S:-}
+AGENT_SIZE_M=${AGENT_SIZE_M:-}
+AGENT_SIZE_L=${AGENT_SIZE_L:-}
 AGENT_RUN_TIMEOUT=${AGENT_RUN_TIMEOUT:-3600}              # seconds one implement / fix run may take (0 = no limit)
 AGENT_MAX_COST_PER_RUN=${AGENT_MAX_COST_PER_RUN:-}        # API-equivalent dollars per run, via the claude CLI's own cap (empty = off)
 AGENT_DAILY_BUDGET=${AGENT_DAILY_BUDGET:-}                # API-equivalent dollars per local day; over it, no agent starts (empty = off)
@@ -395,6 +399,22 @@ same_login() {
   [ -n "$a" ] && [ "$a" = "$b" ]
 }
 
+# The size of an issue from its size:s|m|l label (any case): s, m, l, or nothing (no label, or gh failed)
+issue_size() {
+  gh issue view "$1" --json labels -q '[.labels[].name | ascii_downcase | select(test("^size:[sml]$"))][0] // "" | ltrimstr("size:")' 2>/dev/null || true
+}
+# The model, effort and turns for a size, from AGENT_SIZE_<S|M|L>: prints "model effort turns", the defaults where the
+# setting is empty or a field is '-' (or the turns are not a number)
+size_settings() {
+  local spec m e t
+  case "$1" in s) spec=$AGENT_SIZE_S ;; m) spec=$AGENT_SIZE_M ;; l) spec=$AGENT_SIZE_L ;; *) spec= ;; esac
+  read -r m e t _ <<<"$spec" || true
+  { [ -z "${m:-}" ] || [ "$m" = - ]; } && m=$AGENT_MODEL
+  { [ -z "${e:-}" ] || [ "$e" = - ]; } && e=$AGENT_EFFORT
+  case "${t:-}" in '' | - | *[!0-9]*) t=$AGENT_MAX_TURNS ;; esac
+  echo "$m $e $t"
+}
+
 has_label() { # snapshot.json issue label
   jq -e --argjson n "$2" --arg l "$3" '.[] | select(.number == $n) | .labels | index($l)' "$1" >/dev/null
 }
@@ -519,7 +539,7 @@ block_answered() { # issue
 
 # --- History: one line per finished run, kept when the logs are deleted (AGENT_LOG_DAYS); read by `agent-loop stats` ---
 HISTORY_FILE="$STATE/history.jsonl"
-history_add() { # one JSON object: run, time, issue, mode, outcome, status, pr, turns, cost, model, ...
+history_add() { # one JSON object: run, time, issue, mode, outcome, status, pr, turns, cost, model, size, ...
   [ "${DRY:-0}" = 1 ] && return 0
   printf '%s\n' "$1" >>"$HISTORY_FILE" || true
 }
