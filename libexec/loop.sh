@@ -99,6 +99,47 @@ unlabel_issue() { # issue
     'map(if .number == $n then .labels -= [$ok, $wip] else . end)' "$ISSUES_JSON" >"$t" && mv "$t" "$ISSUES_JSON"
 }
 
+# One line in history.jsonl when an agent PR is merged or closed (#52), for `agent-loop stats`: when it was opened and
+# closed, who merged it (`loop` when the loop did), and the risk the loop judged for it (null when it never judged it).
+# Called before cleanup_branch, which forgets the issue's stamps.
+record_pr_event() { # issue pr MERGED|CLOSED
+  local n=$1 pr=$2 info by=""
+  [ "$DRY" = 1 ] && return 0
+  info=$(gh pr view "$pr" --json createdAt,mergedAt,closedAt,mergedBy 2>/dev/null) || info='{}'
+  echo "$info" | jq -e 'type == "object"' >/dev/null 2>&1 || info='{}'
+  if [ "$(stamp_get automerged "$n" "")" = "$pr" ]; then by=loop; fi
+  history_add "$(jq -nc --argjson i "$info" --argjson n "$n" --argjson pr "$pr" --arg state "$3" --arg by "$by" \
+    --arg risk "$(stamp_get risk "$n" "")" --arg now "$(now_iso)" '
+    ($i.mergedAt // $i.closedAt // $now) as $closed
+    | {run: "pr-\($pr)", time: $closed, issue: $n, mode: "pr", pr: $pr, outcome: (if $state == "MERGED" then "merged" else "closed" end),
+       opened: ($i.createdAt // null), closed: $closed,
+       merged_by: (if $state != "MERGED" then null elif $by != "" then $by else ($i.mergedBy.login // null) end),
+       risk: (if $risk == "" then null else $risk end), turns: 0, cost: 0}')"
+}
+
+# A merged PR on the base branch whose title starts with `Revert "` and that names an agent PR (GitHub's revert PRs say
+# "Reverts owner/repo#<n>" in the body) adds a `reverted` event for that PR, once per revert PR (#52)
+record_reverts() {
+  local line rv target head
+  [ "$DRY" = 1 ] && return 0
+  mkdir -p "$STATE/reverts"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    rv=$(echo "$line" | jq -r .rv); target=$(echo "$line" | jq -r '.target // empty')
+    [ -e "$STATE/reverts/$rv" ] && continue
+    touch "$STATE/reverts/$rv"
+    [ -n "$target" ] || continue
+    head=$(gh pr view "$target" --json headRefName -q .headRefName 2>/dev/null) || continue
+    case "$head" in agent/issue-[0-9]*) ;; *) continue ;; esac
+    log "#${head#agent/issue-}: PR #$target was reverted by PR #$rv"
+    history_add "$(echo "$line" | jq -c --arg h "$head" '{run: "revert-\(.rv)", time: (.t // (now | todate)), issue: ($h | ltrimstr("agent/issue-") | tonumber),
+      mode: "pr", pr: (.target | tonumber), outcome: "reverted", revert_pr: .rv, turns: 0, cost: 0}')"
+  done < <(gh pr list --state merged --base "$AGENT_BASE_BRANCH" --limit 30 --json number,title,body,mergedAt 2>/dev/null |
+    jq -c '.[]? | select((.title // "") | startswith("Revert \""))
+      | {rv: .number, t: .mergedAt,
+         target: (((.body // "") | capture("Reverts [^ #]*#(?<n>[0-9]+)").n) // ((.title // "") | capture("#(?<n>[0-9]+)\\)\"$").n) // null)}' 2>/dev/null || true)
+}
+
 phase_cleanup() {
   local ref n pr state last
   for ref in $(git -C "$REPO" for-each-ref --format='%(refname:short)' 'refs/heads/agent/issue-*'); do
@@ -114,6 +155,7 @@ phase_cleanup() {
       # PR, and after a merge when "Closes #n" did not apply (the base branch is not the default branch, the line
       # is missing, or part of the issue was left for a person). If agent-ok is added again, the work restarts from
       # the base branch on the same branch name; this PR is then ignored because it is remembered as handled.
+      record_pr_event "$n" "$pr" "$state"
       if [ "$state" = MERGED ]; then
         cleanup_branch "$n" "PR #$pr was merged"
         if issue_open "$n"; then
@@ -132,6 +174,7 @@ phase_cleanup() {
       cleanup_branch "$n" "the issue was closed"
     fi
   done
+  record_reverts
   run git -C "$REPO" worktree prune
   [ "$DRY" = 1 ] || find "$STATE/logs" "$STATE/pr-files" -type f -mtime +"$AGENT_LOG_DAYS" -delete 2>/dev/null || true
 }
@@ -282,6 +325,8 @@ phase_automerge() {
     issue_open "$n" || continue
     report=$(pr_risk_report "$pr" "$head" "$n")
     hard=$(report_part "$report" H); soft=$(report_part "$report" S); lines=$(report_part "$report" L)
+    # for the PR's history event and the digest (#52)
+    [ "$DRY" = 1 ] || stamp_set risk "$n" "$(if [ -z "$hard$soft" ]; then echo low; else echo high; fi)"
     blocker=$(automerge_blocker "$p")
     if [ "$policy" = shadow ] && pr_settled "$p"; then
       why=$(printf '%s\n%s\n%s\n' "$hard" "$soft" "$blocker" | join_lines)
@@ -307,7 +352,7 @@ phase_automerge() {
       cc=$(mention)
       run gh pr comment "$pr" --body "$AGENT_MARKER Merged automatically ($AGENT_AUTOMERGE_METHOD). Policy \`$policy\`: $basis, no changed file is on a high-risk path, the PR was mergeable, every check had passed, no feedback was waiting for a fix run, and it closes #$n.${AGENT_AUTOMERGE_REQUIRE_REVIEW:+ The latest review of $AGENT_AUTOMERGE_REQUIRE_REVIEW was clean.}${cc:+ $cc}" >/dev/null || true
       notify "PR merged (#$n)" "PR #$pr was merged automatically ($AGENT_AUTOMERGE_METHOD)" "$(pr_url "$pr")"
-      [ "$DRY" = 1 ] || rm -f "$STATE/stamp/automerge-why-$n"
+      [ "$DRY" = 1 ] || { rm -f "$STATE/stamp/automerge-why-$n"; stamp_set automerged "$n" "$pr"; }
       # it is merged: the rest of this round must not start a fix run for it
       jq --argjson p "$pr" 'map(select(.pr != $p))' "$PRS_JSON" >"$PRS_JSON.t" && mv "$PRS_JSON.t" "$PRS_JSON"
     else
