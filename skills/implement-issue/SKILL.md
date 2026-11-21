@@ -77,6 +77,9 @@ diff that only changes tests, docs or configuration with nothing to run, and say
    - <criterion> — not done: <reason>
    ```
 
+   If the change affects pages of a web UI, also add a `## UI routes` section listing their paths (`- /settings`), for
+   the project's preview-screenshot workflow if it has one.
+
    Every line carries evidence (a test that covers it, or the file and lines that satisfy it, plus what you observed in
    step 4 where you tried it) or `not done` with the reason. If any line is `not done`, or a part is left for a person, write `Refs #<n>` instead of `Closes #<n>`, so that
    merging leaves the issue open.

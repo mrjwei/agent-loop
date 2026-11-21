@@ -247,6 +247,12 @@ Triage maps the fields to labels: `Size` to `size:s`, `size:m` or `size:l`; `Ris
 | `review-check` | the job name of the Claude review workflow is in `AGENT_IGNORE_CHECKS` | warn: while the review runs or fails to start, the loop starts fix runs for it |
 | `automerge-review` | `AGENT_AUTOMERGE_REQUIRE_REVIEW` names the review bot (or auto-merge is off) when a review workflow exists | warn: an issue labeled `agent-automerge` is merged without waiting for the review |
 
+### UI previews
+
+For a UI change, passing tests prove little and the acceptance evidence is text: a person's eyes are the real check, and they should not have to check out the branch to look. For projects with preview deployments that report a GitHub deployment status (Vercel does), `templates/github/ui-preview.yml` is a workflow to copy to `.github/workflows/ui-preview.yml`. When the preview of an open PR is ready, it opens the routes in `.agent-loop/ui-routes` (one path per line) plus those under the PR body's `## UI routes` heading in Chromium (Playwright), and posts one sticky comment with a table of the routes, their HTTP status and a screenshot each; the screenshots are also an artifact, and are committed to a `ui-previews` branch so that the comment can show them. A route fails on an HTTP status of 400 or more or an uncaught page error, and the job fails then. A protected preview needs the secret `VERCEL_AUTOMATION_BYPASS_SECRET`.
+
+The implement prompt (and the plugin's `implement-issue`) writes the `## UI routes` section for changes that affect pages. The comment is posted by `github-actions[bot]`, which the loop does not read as feedback. The screenshots make a person's review quick, not unnecessary: for UI projects, add the component and style paths to `AGENT_RISK_PATHS` (for example `app/** components/** *.css`), so that UI PRs wait for a person who looks at them instead of merging automatically. In supervised sessions the plugin's "try the change" step (with the built-in `verify` skill) covers the same ground before the PR exists.
+
 ### Stats and the daily digest
 
 Without numbers, the effect of a prompt, model or configuration change is a guess. `agent-loop stats [--days N]` (default 7) prints, for the finished runs in that period: runs by mode and outcome, PRs opened, issues blocked, fix runs per opened PR, and turns and API-equivalent cost in total and per opened PR. `--json` prints the same numbers as JSON for other tools. `--digest` prints a short text for the last 24 hours: PRs opened, issues blocked with their reasons, PRs waiting for review, and spend. With `AGENT_DIGEST_HOUR` (a local hour, empty = off) and `AGENT_NOTIFY_CMD` set, the first round at or after that hour sends the digest once a day through the command.
@@ -448,7 +454,7 @@ bin/agent-loop        entry point (dispatches to libexec/)
 libexec/              loop.sh  work.sh  triage.sh  init.sh  plan-lint.sh  ready.sh  stats.sh  lessons.sh  verify-hook.sh (the Stop hook)
 lib/common.sh         configuration, GitHub helpers, usage-limit handling
 prompts/              default implement / fix / triage prompts
-templates/            files `init` writes into a project (config, project rules, the review workflow, plan.md)
+templates/            files `init` writes into a project (config, project rules, the review workflow, plan.md), and github/ui-preview.yml to copy
 .claude-plugin/       plugin manifest and marketplace entry
 skills/               the plugin's skills (implement-issue, address-pr-feedback, plan-to-issues, delegate-issue, harvest-lessons)
 agents/               the plugin's acceptance-reviewer agent

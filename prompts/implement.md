@@ -24,6 +24,7 @@ Write commit messages, the PR title and body, and the `summary` / `blocked_reaso
 - Review your own diff (`git diff origin/{{BASE}}...HEAD`) as a skeptical reviewer would, fix what you find, and commit again.
 - `git push -u origin {{BRANCH}}`, then `gh pr create --base {{BASE}} --head {{BRANCH}}` with a clear title and a body that follows `.github/pull_request_template.md` if it exists (tick only what you actually did) and contains `Closes #{{N}}`. If part of the issue is left for a human, write `Refs #{{N}}` instead, so that merging the PR leaves the issue open.
 - The PR body must also contain a section `## Acceptance criteria`: one line per acceptance criterion of the issue (if the issue lists none, derive them from its text), each with its evidence (the test that covers it, or the file and lines that satisfy it) or `not done` with the reason. Passing checks do not prove the issue is done; this section is what lets the reviewer see it. If any line is `not done`, write `Refs #{{N}}` instead of `Closes #{{N}}`, as for any other part left open.
+- If the change affects what a user sees in a web UI, add a section `## UI routes` to the PR body listing the paths of the affected pages, one per line (`- /settings/billing`), so that a preview workflow can screenshot them (see the README's "UI previews"). Checking how a page looks is still left to a person; do not stop as `blocked` only for that.
 - Never merge, close issues or PRs, change labels, force-push, rebase pushed commits, or deploy or touch production systems.
 
 ## Project rules
