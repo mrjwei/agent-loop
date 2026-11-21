@@ -664,6 +664,12 @@ check "prompts: triage is asked for a Touches line" 1 "$(grep -c 'Touches: src/b
 # --- The PR states the evidence for every acceptance criterion (#27) ---
 check "prompts: the implement prompt requires the section and Refs for a criterion that is not done" '1|1' \
   "$(T_N=3 T_BRANCH=agent/issue-3 render_prompt implement | grep -c '## Acceptance criteria.*not done.*Refs #3')|$(T_N=3 T_BRANCH=agent/issue-3 render_prompt implement | grep -c 'If any line is `not done`, write `Refs #3`')"
+UI="$ROOT/templates/github/ui-preview.yml"
+check "ui-preview: the template reads ui-routes and the PR's UI routes, posts one sticky comment, and fails on a failed route (#60)" '1|1|1|1|1' \
+  "$(grep -c '.agent-loop/ui-routes' "$UI" | sed 's/^[2-9]/1/')|$(grep -c '/^## UI routes/' "$UI")|$(grep -c 'marocchino/sticky-pull-request-comment@v2' "$UI")|$(grep -c 'header: ui-preview' "$UI")|$(grep -c 'Routes that failed' "$UI")"
+check "ui-preview: route lines are filtered to plain paths, and untrusted text never reaches a run step through \${{ }}" '1|0' \
+  "$(grep -c "grep -E '^/\[A-Za-z0-9/_.~%?=&-\]\*\$'" "$UI")|$(grep -cE '\$\{\{ *github\.event\.(pull_request|issue|comment)' "$UI")"
+check "prompts: implement asks for a UI routes section for UI changes" 1 "$(T_N=3 T_BRANCH=agent/issue-3 render_prompt implement | grep -c 'add a section `## UI routes` to the PR body')"
 check "prompts: the fix prompt keeps the section up to date" 1 "$(T_N=3 T_PR=20 T_BRANCH=agent/issue-3 render_prompt fix | grep -c 'Keep the `## Acceptance criteria` section')"
 check "prompts: implement and fix read docs/decisions/ and record settled decisions there (#53)" '1|1|1|1' \
   "$(T_N=3 T_BRANCH=agent/issue-3 render_prompt implement | grep -c 'decision records in `docs/decisions/`')|$(T_N=3 T_BRANCH=agent/issue-3 render_prompt implement | grep -c 'closed issue labeled `question`.*`docs/decisions/NNNN-<slug>.md`')|$(T_N=3 T_PR=20 T_BRANCH=agent/issue-3 render_prompt fix | grep -c 'decision records in `docs/decisions/`')|$(T_N=3 T_PR=20 T_BRANCH=agent/issue-3 render_prompt fix | grep -c 'record it as a short decision record.*docs/decisions/NNNN-<slug>.md')"

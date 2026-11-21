@@ -1,0 +1,180 @@
+# Screenshots of a pull request's preview deployment, in one sticky PR comment (agent-loop: templates/github/ui-preview.yml).
+#
+# For projects with preview deployments that report a GitHub deployment status (Vercel does by default). Copy this file to
+# .github/workflows/ui-preview.yml. When a preview deployment of an open PR succeeds, it:
+#   1. reads the routes to check: `.agent-loop/ui-routes` (one path per line, `#` comments) plus the paths listed under a
+#      `## UI routes` heading in the PR body (agent-loop's implement prompt writes that section for UI changes);
+#   2. opens each route of the preview URL in Chromium (Playwright): a route fails on an HTTP status of 400 or more, or on
+#      an uncaught error in the page;
+#   3. uploads the screenshots as an artifact, commits them to the `ui-previews` branch (so the comment can show them), and
+#      posts or updates one comment on the PR with a table of the routes and their screenshots;
+#   4. fails when a route failed, so the check shows it.
+# A protected preview (Vercel Deployment Protection) needs the repository secret VERCEL_AUTOMATION_BYPASS_SECRET.
+# The comment is posted by github-actions[bot], which agent-loop does not read as review feedback.
+name: ui-preview
+
+on:
+  deployment_status:
+
+permissions:
+  contents: write       # commit the screenshots to the ui-previews branch
+  pull-requests: write  # the sticky comment
+  deployments: read
+
+concurrency:
+  group: ui-preview-${{ github.event.deployment.sha }}
+  cancel-in-progress: true
+
+jobs:
+  screenshots:
+    # contains() ignores case: Vercel names the environment "Preview" (or "Preview – <project>")
+    if: github.event.deployment_status.state == 'success' && contains(github.event.deployment.environment, 'preview')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SHA: ${{ github.event.deployment.sha }}
+      PREVIEW_URL: ${{ github.event.deployment_status.environment_url || github.event.deployment_status.target_url }}
+    steps:
+      - name: Find the pull request of the deployed commit
+        id: pr
+        run: |
+          n=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/pulls" --jq '[.[] | select(.state == "open")][0].number // empty')
+          echo "number=$n" >>"$GITHUB_OUTPUT"
+          if [ -z "$n" ]; then echo "No open pull request for $SHA: nothing to do."; fi
+
+      - uses: actions/checkout@v4
+        if: steps.pr.outputs.number != ''
+        with:
+          ref: ${{ github.event.deployment.sha }}
+
+      - name: Collect the routes
+        if: steps.pr.outputs.number != ''
+        env:
+          PR: ${{ steps.pr.outputs.number }}
+        run: |
+          gh pr view "$PR" --json body -q .body >"$RUNNER_TEMP/body.md"
+          {
+            if [ -f .agent-loop/ui-routes ]; then sed 's/#.*//' .agent-loop/ui-routes; fi
+            awk '/^## UI routes/ { f = 1; next } /^## / { f = 0 }
+                 f && /^[-*] +`?\// { sub(/^[-*] +`?/, ""); sub(/[` ].*$/, ""); print }' "$RUNNER_TEMP/body.md"
+          } | tr -d '[:blank:]\r' | grep -E '^/[A-Za-z0-9/_.~%?=&-]*$' | awk '!seen[$0]++' | head -n 30 >"$RUNNER_TEMP/routes.txt" || true
+          if [ ! -s "$RUNNER_TEMP/routes.txt" ]; then echo / >"$RUNNER_TEMP/routes.txt"; fi
+          echo "Routes:"; cat "$RUNNER_TEMP/routes.txt"
+
+      - uses: actions/setup-node@v4
+        if: steps.pr.outputs.number != ''
+        with:
+          node-version: 22
+
+      - name: Install Playwright (outside the project)
+        if: steps.pr.outputs.number != ''
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir -p pw && cd pw
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
+          npx playwright install --with-deps chromium
+
+      - name: Take the screenshots
+        if: steps.pr.outputs.number != ''
+        working-directory: ${{ runner.temp }}/pw
+        env:
+          BYPASS: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+        run: |
+          cat >shots.js <<'EOF'
+          const fs = require('fs');
+          const path = require('path');
+          const { chromium } = require('playwright');
+          (async () => {
+            const tmp = process.env.RUNNER_TEMP;
+            const base = process.env.PREVIEW_URL.replace(/\/+$/, '');
+            const routes = fs.readFileSync(path.join(tmp, 'routes.txt'), 'utf8').split('\n').filter(Boolean);
+            const dir = path.join(tmp, 'shots');
+            fs.mkdirSync(dir, { recursive: true });
+            const headers = process.env.BYPASS ? { 'x-vercel-protection-bypass': process.env.BYPASS, 'x-vercel-set-bypass-cookie': 'true' } : {};
+            const browser = await chromium.launch();
+            const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, extraHTTPHeaders: headers });
+            const results = [];
+            for (const [i, route] of routes.entries()) {
+              const page = await context.newPage();
+              const errors = [];
+              page.on('pageerror', (e) => errors.push(String(e.message || e)));
+              const file = String(i + 1).padStart(2, '0') + '-' + (route.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'home') + '.png';
+              let status = 0;
+              try {
+                const res = await page.goto(base + route, { waitUntil: 'networkidle', timeout: 45000 });
+                status = res ? res.status() : 0;
+                await page.screenshot({ path: path.join(dir, file), fullPage: true });
+              } catch (e) {
+                errors.push(String(e.message || e).split('\n')[0]);
+              }
+              const ok = status > 0 && status < 400 && errors.length === 0;
+              results.push({ route, status, ok, errors, file: fs.existsSync(path.join(dir, file)) ? file : null });
+              await page.close();
+            }
+            await browser.close();
+            fs.writeFileSync(path.join(tmp, 'results.json'), JSON.stringify(results, null, 2));
+          })().catch((e) => { console.error(e); process.exit(1); });
+          EOF
+          node shots.js
+          cat "$RUNNER_TEMP/results.json"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.pr.outputs.number != ''
+        with:
+          name: ui-preview-${{ github.event.deployment.sha }}
+          path: ${{ runner.temp }}/shots/
+          if-no-files-found: ignore
+
+      - name: Commit the screenshots to the ui-previews branch
+        if: steps.pr.outputs.number != ''
+        env:
+          PR: ${{ steps.pr.outputs.number }}
+        run: |
+          short=${SHA:0:7}
+          pub="$RUNNER_TEMP/pub"
+          mkdir -p "$pub" && cd "$pub"
+          git init -q
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git fetch -q --depth 1 origin ui-previews; then git checkout -q FETCH_HEAD; fi
+          rm -rf "pr-$PR"
+          mkdir -p "pr-$PR/$short"
+          if compgen -G "$RUNNER_TEMP/shots/*.png" >/dev/null; then cp "$RUNNER_TEMP"/shots/*.png "pr-$PR/$short/"; fi
+          git add -A
+          if git diff --cached --quiet; then exit 0; fi
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -q -m "UI preview of #$PR at $short"
+          git push -q origin HEAD:refs/heads/ui-previews
+
+      - name: Write the comment
+        if: steps.pr.outputs.number != ''
+        env:
+          PR: ${{ steps.pr.outputs.number }}
+        run: |
+          short=${SHA:0:7}
+          raw="https://github.com/$GITHUB_REPOSITORY/raw/ui-previews/pr-$PR/$short"
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          {
+            echo "## UI preview of $short"
+            echo
+            echo "Preview: $PREVIEW_URL · [screenshots as an artifact]($run_url)"
+            echo
+            echo "| Route | Result | Screenshot |"
+            echo "|---|---|---|"
+            jq -r --arg raw "$raw" '.[] | "| `\(.route)` | \(if .ok then "✅ \(.status)" else "❌ \(.status) \(.errors | join("; ") | .[0:200] | gsub("\\|"; "/"))" end) | \(if .file then "<img src=\"\($raw)/\(.file)\" width=\"420\">" else "-" end) |"' \
+              "$RUNNER_TEMP/results.json"
+          } >"$RUNNER_TEMP/comment.md"
+
+      - uses: marocchino/sticky-pull-request-comment@v2
+        if: steps.pr.outputs.number != ''
+        with:
+          header: ui-preview
+          number: ${{ steps.pr.outputs.number }}
+          path: ${{ runner.temp }}/comment.md
+
+      - name: Fail when a route failed
+        if: steps.pr.outputs.number != ''
+        run: |
+          failed=$(jq -r '[.[] | select(.ok | not) | .route] | join(", ")' "$RUNNER_TEMP/results.json")
+          if [ -n "$failed" ]; then echo "::error::Routes that failed: $failed"; exit 1; fi
